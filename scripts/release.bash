@@ -99,6 +99,8 @@ cd ./packages/shared && npm publish --access public && cd ../../
 update_shared_dep "packages/server/package.json" $(jq -r '.version' $SHARED_PACKAGE_JSON)
 update_shared_dep "packages/worker/package.json" $(jq -r '.version' $SHARED_PACKAGE_JSON)
 update_shared_dep "packages/cli/package.json" $(jq -r '.version' $SHARED_PACKAGE_JSON)
+update_shared_dep "packages/jobs/package.json" $(jq -r '.version' $SHARED_PACKAGE_JSON)
+update_shared_dep "packages/runner/package.json" $(jq -r '.version' $SHARED_PACKAGE_JSON)
 
 # update the webapp and frontend
 FRONTEND_PACKAGE_JSON="packages/frontend/package.json"
@@ -148,6 +150,6 @@ update_package_json_version $CLI_PACKAGE_JSON $3
 cp ./packages/shared/dist/lib/sdk/sync.d.ts ./packages/cli/dist/nango-sync.d.ts
 chmod +x ./packages/cli/dist/index.js
 
-cd ./packages/cli && npm publish --access public && cd ../../
+cd ./packages/cli && npm run copyfiles && npm publish --access public && cd ../../
 
 npm i

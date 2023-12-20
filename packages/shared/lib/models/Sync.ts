@@ -1,7 +1,8 @@
+import type { Context } from '@temporalio/activity';
 import { LogActionEnum } from './Activity.js';
-import type { Timestamps, TimestampsAndDeleted } from './Generic.js';
-import type { NangoSync } from '../sdk/sync.js';
-import type { NangoIntegrationData } from '../integrations/index.js';
+import type { HTTP_VERB, Timestamps, TimestampsAndDeleted } from './Generic.js';
+import type { NangoProps } from '../sdk/sync.js';
+import type { NangoIntegrationData, NangoSyncEndpoint } from './NangoConfig.js';
 
 export enum SyncStatus {
     RUNNING = 'RUNNING',
@@ -14,6 +15,8 @@ export enum SyncStatus {
 export enum SyncType {
     INITIAL = 'INITIAL',
     INCREMENTAL = 'INCREMENTAL',
+    WEBHOOK = 'WEBHOOK',
+    FULL = 'FULL',
     ACTION = 'ACTION'
 }
 
@@ -53,6 +56,14 @@ export interface Job extends TimestampsAndDeleted {
     sync_config_id?: number;
 }
 
+export interface ReportedSyncJobStatus {
+    id?: string;
+    name?: string;
+    status: SyncStatus;
+    latestResult?: SyncResultByModel;
+    jobStatus?: SyncStatus;
+}
+
 export interface SyncModelSchema {
     name: string;
     fields: {
@@ -89,6 +100,18 @@ export interface SyncConfig extends TimestampsAndDeleted {
     version?: string;
     pre_built?: boolean;
     is_public?: boolean;
+    endpoints?: NangoSyncEndpoint[];
+    input?: string;
+    sync_type?: SyncType | undefined;
+    webhook_subscriptions?: string[];
+}
+
+export interface SyncEndpoint extends Timestamps {
+    id?: number;
+    sync_config_id: number;
+    method: HTTP_VERB;
+    path: string;
+    model?: string;
 }
 
 export interface SlimSync {
@@ -137,6 +160,7 @@ interface InternalIncomingPreBuiltFlowConfig {
     attributes?: object;
     metadata?: NangoConfigMetadata;
     model_schema: string;
+    endpoints?: NangoSyncEndpoint[];
 }
 
 export interface IncomingPreBuiltFlowConfig extends InternalIncomingPreBuiltFlowConfig {
@@ -154,7 +178,7 @@ export interface IncomingPreBuiltFlowConfig extends InternalIncomingPreBuiltFlow
     };
 }
 
-export interface IncomingSyncConfig extends InternalIncomingPreBuiltFlowConfig {
+export interface IncomingFlowConfig extends InternalIncomingPreBuiltFlowConfig {
     syncName: string;
     providerConfigKey: string;
     fileBody?: {
@@ -163,6 +187,9 @@ export interface IncomingSyncConfig extends InternalIncomingPreBuiltFlowConfig {
     };
     version?: string;
     track_deletes?: boolean;
+    input?: string;
+    sync_type?: SyncType;
+    webhookSubscriptions?: string[];
 }
 
 export enum ScheduleStatus {
@@ -183,13 +210,18 @@ export interface Schedule extends TimestampsAndDeleted {
 
 export type CustomerFacingDataRecord = {
     _nango_metadata: RecordMetadata;
-} & Record<string, any>;
+} & Record<string, any> & { id: string | number };
+
+export type GetRecordsResponse = { records: CustomerFacingDataRecord[] | DataRecordWithMetadata[]; next_cursor?: string | null } | null;
+
+export type RecordWrapCustomerFacingDataRecord = { record: CustomerFacingDataRecord }[];
 
 export interface DataRecord extends Timestamps {
     [index: string]: number | string | Date | object | undefined | boolean | null;
     id?: string;
     external_id: string;
     json: object;
+    record?: object;
     data_hash: string;
     nango_connection_id: number;
     model: string;
@@ -206,7 +238,7 @@ export type LastAction = 'added' | 'updated' | 'deleted';
 
 interface RecordMetadata {
     first_seen_at: Date;
-    last_seen_at: Date;
+    last_modified_at: Date;
     last_action: LastAction;
     deleted_at: Date | null;
 }
@@ -239,6 +271,7 @@ export const SyncCommandToScheduleStatus = {
 };
 
 export interface NangoSyncWebhookBody {
+    from: string;
     connectionId: string;
     providerConfigKey: string;
     syncName: string;
@@ -262,13 +295,16 @@ export interface SyncConfigWithProvider {
 export interface IntegrationServiceInterface {
     runScript(
         syncName: string,
+        syncId: string,
         activityLogId: number | undefined,
-        nango: NangoSync,
+        nangoProps: NangoProps,
         integrationData: NangoIntegrationData,
         environmentId: number,
         writeToDb: boolean,
-        isAction: boolean,
+        isInvokedImmediately: boolean,
+        isWebhook: boolean,
         optionalLoadLocation?: string,
-        input?: object
+        input?: object,
+        temporalContext?: Context
     ): Promise<any>;
 }

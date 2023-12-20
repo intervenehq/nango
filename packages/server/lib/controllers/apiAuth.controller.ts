@@ -7,7 +7,7 @@ import {
     errorManager,
     analytics,
     AnalyticsTypes,
-    SyncClient,
+    connectionCreated as connectionCreatedHook,
     createActivityLogMessage,
     updateSuccess as updateSuccessActivityLog,
     updateProvider as updateProviderActivityLog,
@@ -156,8 +156,15 @@ class ApiAuthController {
             );
 
             if (updatedConnection) {
-                const syncClient = await SyncClient.getInstance();
-                await syncClient?.initiate(updatedConnection.id);
+                await connectionCreatedHook(
+                    {
+                        id: updatedConnection.id,
+                        connection_id: connectionId,
+                        provider_config_key: providerConfigKey,
+                        environment_id: environmentId
+                    },
+                    config?.provider as string
+                );
             }
 
             res.status(200).send({ providerConfigKey: providerConfigKey as string, connectionId: connectionId as string });
@@ -221,12 +228,6 @@ class ApiAuthController {
                 return;
             }
 
-            if (!req.body.username) {
-                errorManager.errRes(res, 'missing_basic_username');
-
-                return;
-            }
-
             const hmacEnabled = await hmacService.isEnabled(environmentId);
             if (hmacEnabled) {
                 const hmac = req.query['hmac'] as string | undefined;
@@ -258,7 +259,7 @@ class ApiAuthController {
                 }
             }
 
-            const { username, password } = req.body;
+            const { username = '', password = '' } = req.body;
 
             const config = await configService.getProviderConfig(providerConfigKey as string, environmentId);
 
@@ -319,8 +320,15 @@ class ApiAuthController {
             );
 
             if (updatedConnection) {
-                const syncClient = await SyncClient.getInstance();
-                await syncClient?.initiate(updatedConnection.id);
+                await connectionCreatedHook(
+                    {
+                        id: updatedConnection.id,
+                        connection_id: connectionId,
+                        provider_config_key: providerConfigKey,
+                        environment_id: environmentId
+                    },
+                    config?.provider as string
+                );
             }
 
             res.status(200).send({ providerConfigKey: providerConfigKey as string, connectionId: connectionId as string });

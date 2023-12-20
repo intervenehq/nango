@@ -13,7 +13,8 @@ import {
     FlowDownloadBody,
     remoteFileService,
     getAllSyncsAndActions,
-    getNangoConfigIdAndLocationFromId
+    getNangoConfigIdAndLocationFromId,
+    getSyncsByConnectionIdsAndEnvironmentIdAndSyncName
 } from '@nangohq/shared';
 
 class FlowController {
@@ -189,6 +190,52 @@ class FlowController {
             const nangoConfigs = await getAllSyncsAndActions(environmentId);
 
             res.send(nangoConfigs);
+        } catch (e) {
+            next(e);
+        }
+    }
+
+    public async deleteFlow(req: Request, res: Response, next: NextFunction) {
+        try {
+            const { success, error, response } = await getEnvironmentAndAccountId(res, req);
+
+            if (!success || response === null) {
+                errorManager.errResFromNangoErr(res, error);
+                return;
+            }
+
+            const { environmentId } = response;
+
+            const id = req.params['id'];
+            const connectionIds = req.query['connectionIds'] as string;
+            const syncName = req.query['sync_name'] as string;
+
+            if (!id) {
+                res.status(400).send('Missing id');
+                return;
+            }
+
+            if (!connectionIds) {
+                res.status(400).send('Missing connectionIds');
+                return;
+            }
+
+            if (!syncName) {
+                res.status(400).send('Missing sync_name');
+                return;
+            }
+
+            const connections = connectionIds.split(',');
+
+            const syncs = await getSyncsByConnectionIdsAndEnvironmentIdAndSyncName(connections, environmentId, syncName);
+
+            for (const sync of syncs) {
+                await syncOrchestrator.deleteSync(sync.id as string, environmentId);
+            }
+
+            await syncOrchestrator.deleteConfig(Number(id), environmentId);
+
+            res.sendStatus(204);
         } catch (e) {
             next(e);
         }

@@ -13,15 +13,16 @@ import {
 } from '../../activity/activity.service.js';
 import { getSyncsByProviderConfigAndSyncName } from '../sync.service.js';
 import { LogActionEnum, LogLevel } from '../../../models/Activity.js';
-import type { ServiceResponse } from '../../../models/Generic.js';
+import type { HTTP_VERB, ServiceResponse } from '../../../models/Generic.js';
 import {
     SyncModelSchema,
-    IncomingSyncConfig,
+    IncomingFlowConfig,
     SyncConfig,
     SyncDeploymentResult,
     SyncConfigResult,
     SyncConfigType,
-    IncomingPreBuiltFlowConfig
+    IncomingPreBuiltFlowConfig,
+    SyncEndpoint
 } from '../../../models/Sync.js';
 import { NangoError } from '../../../utils/error.js';
 import metricsManager, { MetricTypes } from '../../../utils/metrics.manager.js';
@@ -30,21 +31,24 @@ import { nangoConfigFile } from '../../nango-config.service.js';
 import { getSyncAndActionConfigByParams, increment, getSyncAndActionConfigsBySyncNameAndConfigId } from './config.service.js';
 
 const TABLE = dbNamespace + 'sync_configs';
+const ENDPOINT_TABLE = dbNamespace + 'sync_endpoints';
 
 const nameOfType = 'sync/action';
 
+type FlowWithVersion = Omit<IncomingFlowConfig, 'fileBody'>;
+
 export async function deploy(
     environment_id: number,
-    syncs: IncomingSyncConfig[],
+    flows: IncomingFlowConfig[],
     nangoYamlBody: string,
     debug = false
 ): Promise<ServiceResponse<SyncConfigResult | null>> {
-    const insertData = [];
+    const insertData: SyncConfig[] = [];
 
-    const providers = syncs.map((sync) => sync.providerConfigKey);
+    const providers = flows.map((flow) => flow.providerConfigKey);
     const providerConfigKeys = [...new Set(providers)];
 
-    const idsToMarkAsInvactive = [];
+    const idsToMarkAsInvactive: number[] = [];
     const accountId = (await environmentService.getAccountIdFromEnvironment(environment_id)) as number;
 
     const log = {
@@ -56,15 +60,15 @@ export async function deploy(
         timestamp: Date.now(),
         connection_id: null,
         provider: null,
-        provider_config_key: `${syncs.length} sync${syncs.length === 1 ? '' : 's'} from ${providerConfigKeys.length} integration${
+        provider_config_key: `${flows.length} sync${flows.length === 1 ? '' : 's'} from ${providerConfigKeys.length} integration${
             providerConfigKeys.length === 1 ? '' : 's'
         }`,
         environment_id: environment_id,
         operation_name: LogActionEnum.SYNC_DEPLOY
     };
 
-    let syncsWithVersions: Omit<IncomingSyncConfig, 'fileBody'>[] = syncs.map((sync) => {
-        const { fileBody: _fileBody, model_schema, ...rest } = sync;
+    let flowsWithVersions: FlowWithVersion[] = flows.map((flow) => {
+        const { fileBody: _fileBody, model_schema, ...rest } = flow;
         const modelSchema = JSON.parse(model_schema);
         return { ...rest, model_schema: modelSchema };
     });
@@ -78,148 +82,25 @@ export async function deploy(
 
     const flowReturnData: SyncDeploymentResult[] = [];
 
-    for (const sync of syncs) {
-        const {
-            syncName,
-            providerConfigKey,
-            fileBody,
-            models,
-            runs,
-            version: optionalVersion,
-            model_schema,
-            type = SyncConfigType.SYNC,
-            track_deletes,
-            auto_start,
-            attributes = {},
-            metadata = {}
-        } = sync;
-        if (type === SyncConfigType.SYNC && !runs) {
-            const error = new NangoError('missing_required_fields_on_deploy');
-
-            return { success: false, error, response: null };
-        }
-
-        if (!syncName || !providerConfigKey || !fileBody) {
-            const error = new NangoError('missing_required_fields_on_deploy');
-
-            return { success: false, error, response: null };
-        }
-
-        const config = await configService.getProviderConfig(providerConfigKey, environment_id);
-
-        if (!config) {
-            const error = new NangoError('unknown_provider_config', { providerConfigKey });
-
-            return { success: false, error, response: null };
-        }
-
-        const previousSyncAndActionConfig = await getSyncAndActionConfigByParams(environment_id, syncName, providerConfigKey);
-        let bumpedVersion = '';
-
-        if (previousSyncAndActionConfig) {
-            bumpedVersion = increment(previousSyncAndActionConfig.version as string | number).toString();
-
-            if (debug) {
-                await createActivityLogMessage({
-                    level: 'debug',
-                    environment_id,
-                    activity_log_id: activityLogId as number,
-                    timestamp: Date.now(),
-                    content: `A previous sync config was found for ${syncName} with version ${previousSyncAndActionConfig.version}`
-                });
-            }
-
-            const syncs = await getSyncsByProviderConfigAndSyncName(environment_id, providerConfigKey, syncName);
-            for (const sync of syncs) {
-                if (!runs) {
-                    continue;
-                }
-                const { success, error } = await updateSyncScheduleFrequency(sync.id as string, runs, syncName, activityLogId as number, environment_id);
-
-                if (!success) {
-                    return { success, error, response: null };
-                }
-            }
-        }
-
-        const version = optionalVersion || bumpedVersion || '1';
-
-        const jsFile = typeof fileBody === 'string' ? fileBody : fileBody?.js;
-        const file_location = (await remoteFileService.upload(
-            jsFile as string,
-            `${env}/account/${accountId}/environment/${environment_id}/config/${config.id}/${syncName}-v${version}.js`,
-            environment_id
-        )) as string;
-
-        if (typeof fileBody === 'object' && fileBody?.ts) {
-            await remoteFileService.upload(
-                fileBody.ts,
-                `${env}/account/${accountId}/environment/${environment_id}/config/${config.id}/${syncName}.ts`,
-                environment_id
-            );
-        }
-
-        syncsWithVersions = syncsWithVersions.map((syncWithVersion) => {
-            if (syncWithVersion.syncName === syncName) {
-                return { ...syncWithVersion, version };
-            }
-            return syncWithVersion;
-        });
-
-        if (!file_location) {
-            await updateSuccessActivityLog(activityLogId as number, false);
-
-            await createActivityLogMessageAndEnd({
-                level: 'error',
-                environment_id,
-                activity_log_id: activityLogId as number,
-                timestamp: Date.now(),
-                content: `There was an error uploading the sync file ${syncName}-v${version}.js`
-            });
-
-            // this is a platform error so throw this
-            throw new NangoError('file_upload_error');
-        }
-
-        const oldConfigs = await getSyncAndActionConfigsBySyncNameAndConfigId(environment_id, config.id as number, syncName);
-
-        if (oldConfigs.length > 0) {
-            const ids = oldConfigs.map((oldConfig: SyncConfig) => oldConfig.id as number);
-            idsToMarkAsInvactive.push(...ids);
-
-            if (debug) {
-                await createActivityLogMessage({
-                    level: 'debug',
-                    environment_id,
-                    activity_log_id: activityLogId as number,
-                    timestamp: Date.now(),
-                    content: `Marking ${ids.length} old sync configs as inactive for ${syncName} with version ${version} as the active sync config`
-                });
-            }
-        }
-
-        insertData.push({
+    for (const flow of flows) {
+        const { success, error, response } = await compileDeployInfo(
+            flow,
+            flowsWithVersions,
+            idsToMarkAsInvactive,
+            insertData,
+            flowReturnData,
+            env,
             environment_id,
-            nango_config_id: config?.id as number,
-            sync_name: syncName,
-            type,
-            models,
-            version,
-            track_deletes: track_deletes || false,
-            auto_start: auto_start === false ? false : true,
-            attributes,
-            metadata,
-            file_location,
-            runs,
-            active: true,
-            model_schema: model_schema as unknown as SyncModelSchema[]
-        });
+            accountId,
+            activityLogId as number,
+            debug
+        );
 
-        flowReturnData.push({
-            ...sync,
-            name: syncName,
-            version
-        });
+        if (!success || !response) {
+            return { success, error, response: null };
+        }
+
+        flowsWithVersions = response as FlowWithVersion[];
     }
 
     if (insertData.length === 0) {
@@ -238,7 +119,32 @@ export async function deploy(
     }
 
     try {
-        await schema().from<SyncConfig>(TABLE).insert(insertData);
+        const flowIds = await schema().from<SyncConfig>(TABLE).insert(insertData).returning('id');
+
+        const endpoints: Array<SyncEndpoint> = [];
+        flowIds.forEach((row, index) => {
+            const flow = flows[index] as IncomingFlowConfig;
+            if (flow.endpoints && row.id) {
+                flow.endpoints.forEach((endpoint, endpointIndex: number) => {
+                    const method = Object.keys(endpoint)[0] as HTTP_VERB;
+                    const path = endpoint[method] as string;
+                    const res: SyncEndpoint = {
+                        sync_config_id: row.id as number,
+                        method,
+                        path
+                    };
+                    const model = flow.models[endpointIndex] as string;
+                    if (model) {
+                        res.model = model;
+                    }
+                    endpoints.push(res);
+                });
+            }
+        });
+
+        if (endpoints.length > 0) {
+            await schema().from<SyncEndpoint>(ENDPOINT_TABLE).insert(endpoints);
+        }
 
         if (idsToMarkAsInvactive.length > 0) {
             await schema().from<SyncConfig>(TABLE).update({ active: false }).whereIn('id', idsToMarkAsInvactive);
@@ -251,11 +157,11 @@ export async function deploy(
             environment_id,
             activity_log_id: activityLogId as number,
             timestamp: Date.now(),
-            content: `Successfully deployed the ${nameOfType}${syncsWithVersions.length > 1 ? 's' : ''} ${JSON.stringify(syncsWithVersions, null, 2)}`
+            content: `Successfully deployed the ${nameOfType}${flowsWithVersions.length > 1 ? 's' : ''} ${JSON.stringify(flowsWithVersions, null, 2)}`
         });
 
-        const shortContent = `Successfully deployed the ${nameOfType}${syncsWithVersions.length > 1 ? 's' : ''} (${syncsWithVersions
-            .map((sync) => sync.syncName)
+        const shortContent = `Successfully deployed the ${nameOfType}${flowsWithVersions.length > 1 ? 's' : ''} (${flowsWithVersions
+            .map((flow) => flow['syncName'])
             .join(', ')}).`;
 
         await metricsManager.capture(
@@ -264,7 +170,7 @@ export async function deploy(
             LogActionEnum.SYNC_DEPLOY,
             {
                 environmentId: String(environment_id),
-                syncName: syncsWithVersions.map((sync) => sync.syncName).join(', '),
+                syncName: flowsWithVersions.map((flow) => flow['syncName']).join(', '),
                 accountId: String(accountId),
                 providers: providers.join(', ')
             },
@@ -276,13 +182,13 @@ export async function deploy(
         await updateSuccessActivityLog(activityLogId as number, false);
 
         await createActivityLogDatabaseErrorMessageAndEnd(
-            `Failed to deploy the syncs (${JSON.stringify(syncsWithVersions, null, 2)}).`,
+            `Failed to deploy the syncs (${JSON.stringify(flowsWithVersions, null, 2)}).`,
             e,
             activityLogId as number,
             environment_id
         );
 
-        const shortContent = `Failure to deploy the syncs (${syncsWithVersions.map((sync) => sync.syncName).join(', ')}).`;
+        const shortContent = `Failure to deploy the syncs (${flowsWithVersions.map((flow) => flow.syncName).join(', ')}).`;
 
         await metricsManager.capture(
             MetricTypes.SYNC_DEPLOY_FAILURE,
@@ -290,7 +196,7 @@ export async function deploy(
             LogActionEnum.SYNC_DEPLOY,
             {
                 environmentId: String(environment_id),
-                syncName: syncsWithVersions.map((sync) => sync.syncName).join(', '),
+                syncName: flowsWithVersions.map((flow) => flow.syncName).join(', '),
                 accountId: String(accountId),
                 providers: providers.join(', ')
             },
@@ -501,7 +407,32 @@ export async function deployPreBuilt(
     const isPublic = configs.every((config) => config.is_public);
 
     try {
-        await schema().from<SyncConfig>(TABLE).insert(insertData);
+        const syncIds = await schema().from<SyncConfig>(TABLE).insert(insertData).returning('id');
+
+        const endpoints: Array<SyncEndpoint> = [];
+        syncIds.forEach((row, index) => {
+            const sync = configs[index] as IncomingPreBuiltFlowConfig;
+            if (sync.endpoints && row.id) {
+                sync.endpoints.forEach((endpoint, endpointIndex) => {
+                    const method = Object.keys(endpoint)[0] as HTTP_VERB;
+                    const path = endpoint[method] as string;
+                    const res: SyncEndpoint = {
+                        sync_config_id: row.id as number,
+                        method,
+                        path
+                    };
+                    const model = sync.models[endpointIndex] as string;
+                    if (model) {
+                        res.model = model;
+                    }
+                    endpoints.push(res);
+                });
+            }
+        });
+
+        if (endpoints.length > 0) {
+            await schema().from<SyncEndpoint>(ENDPOINT_TABLE).insert(endpoints);
+        }
 
         if (idsToMarkAsInvactive.length > 0) {
             await schema().from<SyncConfig>(TABLE).update({ active: false }).whereIn('id', idsToMarkAsInvactive);
@@ -568,4 +499,167 @@ export async function deployPreBuilt(
 
         throw new NangoError('error_creating_sync_config');
     }
+}
+
+async function compileDeployInfo(
+    flow: IncomingFlowConfig,
+    flowsWithVersions: FlowWithVersion[],
+    idsToMarkAsInvactive: number[],
+    insertData: SyncConfig[],
+    flowReturnData: SyncConfigResult['result'],
+    env: string,
+    environment_id: number,
+    accountId: number,
+    activityLogId: number,
+    debug: boolean
+): Promise<ServiceResponse<FlowWithVersion[]>> {
+    const {
+        syncName,
+        providerConfigKey,
+        fileBody,
+        models,
+        runs,
+        version: optionalVersion,
+        model_schema,
+        type = SyncConfigType.SYNC,
+        track_deletes,
+        auto_start,
+        attributes = {},
+        metadata = {}
+    } = flow;
+    if (type === SyncConfigType.SYNC && !runs) {
+        const error = new NangoError('missing_required_fields_on_deploy');
+
+        return { success: false, error, response: null };
+    }
+
+    if (!syncName || !providerConfigKey || !fileBody) {
+        const error = new NangoError('missing_required_fields_on_deploy');
+
+        return { success: false, error, response: null };
+    }
+
+    const config = await configService.getProviderConfig(providerConfigKey, environment_id);
+
+    if (!config) {
+        const error = new NangoError('unknown_provider_config', { providerConfigKey });
+
+        return { success: false, error, response: null };
+    }
+
+    const previousSyncAndActionConfig = await getSyncAndActionConfigByParams(environment_id, syncName, providerConfigKey);
+    let bumpedVersion = '';
+
+    if (previousSyncAndActionConfig) {
+        bumpedVersion = increment(previousSyncAndActionConfig.version as string | number).toString();
+
+        if (debug) {
+            await createActivityLogMessage({
+                level: 'debug',
+                environment_id,
+                activity_log_id: activityLogId as number,
+                timestamp: Date.now(),
+                content: `A previous sync config was found for ${syncName} with version ${previousSyncAndActionConfig.version}`
+            });
+        }
+
+        const syncs = await getSyncsByProviderConfigAndSyncName(environment_id, providerConfigKey, syncName);
+        for (const sync of syncs) {
+            if (!runs) {
+                continue;
+            }
+            const { success, error } = await updateSyncScheduleFrequency(sync.id as string, runs, syncName, activityLogId as number, environment_id);
+
+            if (!success) {
+                return { success, error, response: null };
+            }
+        }
+    }
+
+    const version = optionalVersion || bumpedVersion || '1';
+
+    const jsFile = typeof fileBody === 'string' ? fileBody : fileBody?.js;
+    const file_location = (await remoteFileService.upload(
+        jsFile as string,
+        `${env}/account/${accountId}/environment/${environment_id}/config/${config.id}/${syncName}-v${version}.js`,
+        environment_id
+    )) as string;
+
+    if (typeof fileBody === 'object' && fileBody?.ts) {
+        await remoteFileService.upload(
+            fileBody.ts,
+            `${env}/account/${accountId}/environment/${environment_id}/config/${config.id}/${syncName}.ts`,
+            environment_id
+        );
+    }
+
+    flowsWithVersions = flowsWithVersions.map((flowWithVersions) => {
+        if (flowWithVersions['syncName'] === syncName) {
+            return {
+                ...flowWithVersions,
+                version
+            } as unknown as FlowWithVersion;
+        }
+        return flowWithVersions;
+    });
+
+    if (!file_location) {
+        await updateSuccessActivityLog(activityLogId as number, false);
+
+        await createActivityLogMessageAndEnd({
+            level: 'error',
+            environment_id,
+            activity_log_id: activityLogId as number,
+            timestamp: Date.now(),
+            content: `There was an error uploading the sync file ${syncName}-v${version}.js`
+        });
+
+        // this is a platform error so throw this
+        throw new NangoError('file_upload_error');
+    }
+
+    const oldConfigs = await getSyncAndActionConfigsBySyncNameAndConfigId(environment_id, config.id as number, syncName);
+
+    if (oldConfigs.length > 0) {
+        const ids = oldConfigs.map((oldConfig: SyncConfig) => oldConfig.id as number);
+        idsToMarkAsInvactive.push(...ids);
+
+        if (debug) {
+            await createActivityLogMessage({
+                level: 'debug',
+                environment_id,
+                activity_log_id: activityLogId as number,
+                timestamp: Date.now(),
+                content: `Marking ${ids.length} old sync configs as inactive for ${syncName} with version ${version} as the active sync config`
+            });
+        }
+    }
+
+    insertData.push({
+        environment_id,
+        nango_config_id: config?.id as number,
+        sync_name: syncName,
+        type,
+        models,
+        version,
+        track_deletes: track_deletes || false,
+        auto_start: auto_start === false ? false : true,
+        attributes,
+        metadata,
+        file_location,
+        runs,
+        active: true,
+        model_schema: model_schema as unknown as SyncModelSchema[],
+        input: flow.input || '',
+        sync_type: flow.sync_type,
+        webhook_subscriptions: flow.webhookSubscriptions || []
+    });
+
+    flowReturnData.push({
+        ...flow,
+        name: syncName,
+        version
+    });
+
+    return { success: true, error: null, response: flowsWithVersions };
 }

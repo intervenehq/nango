@@ -3,7 +3,7 @@ import {
     environmentService,
     AuthCredentials,
     NangoError,
-    SyncClient,
+    connectionCreated as connectionCreatedHook,
     findActivityLogBySession,
     errorManager,
     analytics,
@@ -12,13 +12,16 @@ import {
     updateSuccess as updateSuccessActivityLog,
     configService,
     connectionService,
+    LogActionEnum,
     createActivityLogMessageAndEnd,
+    metricsManager,
+    MetricTypes,
     AuthModes
 } from '@nangohq/shared';
 import { missesInterpolationParam } from '../utils/utils.js';
 import { WSErrBuilder } from '../utils/web-socket-error.js';
 import oAuthSessionService from '../services/oauth-session.service.js';
-import wsClient from '../clients/web-socket.client.js';
+import publisher from '../clients/publisher.client.js';
 
 class AppAuthController {
     async connect(req: Request, res: Response, _next: NextFunction) {
@@ -109,7 +112,7 @@ class AppAuthController {
                     }
                 });
 
-                return wsClient.notifyErr(
+                return publisher.notifyErr(
                     res,
                     wsClientId,
                     providerConfigKey,
@@ -129,7 +132,19 @@ class AppAuthController {
                     timestamp: Date.now()
                 });
 
-                return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, error as NangoError);
+                await metricsManager.capture(
+                    MetricTypes.AUTH_TOKEN_REQUEST_FAILURE,
+                    `App auth token retrieval request process failed ${error?.message}`,
+                    LogActionEnum.AUTH,
+                    {
+                        environmentId: String(environmentId),
+                        providerConfigKey: String(providerConfigKey),
+                        connectionId: String(connectionId),
+                        authMode: String(template.auth_mode)
+                    }
+                );
+
+                return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, error as NangoError);
             }
 
             await updateSuccessActivityLog(activityLogId as number, true);
@@ -145,8 +160,15 @@ class AppAuthController {
             );
 
             if (updatedConnection) {
-                const syncClient = await SyncClient.getInstance();
-                await syncClient?.initiate(updatedConnection.id);
+                await connectionCreatedHook(
+                    {
+                        id: updatedConnection.id,
+                        connection_id: connectionId,
+                        provider_config_key: providerConfigKey,
+                        environment_id: environmentId
+                    },
+                    session.provider
+                );
             }
 
             await createActivityLogMessageAndEnd({
@@ -157,7 +179,15 @@ class AppAuthController {
                 timestamp: Date.now()
             });
 
-            return wsClient.notifySuccess(res, wsClientId, providerConfigKey, connectionId);
+            await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_SUCCESS, 'App auth token request succeeded', LogActionEnum.AUTH, {
+                environmentId: String(environmentId),
+                providerConfigKey: String(providerConfigKey),
+                provider: String(config.provider),
+                connectionId: String(connectionId),
+                authMode: String(template.auth_mode)
+            });
+
+            return publisher.notifySuccess(res, wsClientId, providerConfigKey, connectionId);
         } catch (err) {
             const prettyError = JSON.stringify(err, ['message', 'name'], 2);
 
@@ -173,7 +203,13 @@ class AppAuthController {
                 url: req.originalUrl
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
+            await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_FAILURE, `App auth request process failed ${content}`, LogActionEnum.AUTH, {
+                environmentId: String(environmentId),
+                providerConfigKey: String(providerConfigKey),
+                connectionId: String(connectionId)
+            });
+
+            return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
         }
     }
 }

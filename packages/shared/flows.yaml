@@ -101,6 +101,20 @@ integrations:
       runs: every half hour
       returns:
         - GithubIssue
+      description: |
+        Fetches the Github issues from all a user's repositories.
+        Details: full sync, doesn't track deletes, metadata is not required.
+        Scope(s): repo or public_repo
+    github-issues-lite:
+      runs: every day
+      auto_start: false
+      returns:
+        - Issue
+      description: |
+        Fetches the Github issues but up to a maximum of 15 for demo
+        purposes.
+        Details: limited sync, doesn't track deletes, metadata is not required.
+        Scope(s): repo or public_repo
     github-list-files-sync:
       type: sync
       runs: every hour
@@ -114,6 +128,9 @@ integrations:
     github-write-file-action:
       type: action
     models:
+      Issue:
+        id: integer
+        __extends: GithubIssue
       GithubIssue:
         id: integer
         owner: string
@@ -140,7 +157,228 @@ integrations:
         name: string
         url: string
         last_modified_date: date
-  gmail:
+  google-calendar:
+    google-calendar-events:
+      description: |
+        Sync calendar events on the primary calendar going back one month and
+        save the entire object as specified by the Google API.
+        Details: partial sync, doesn't support deletes, sync goes back one
+        month, metadata is not required.
+        Required scope(s): https://www.googleapis.com/auth/calendar.readonly
+      type: sync
+      runs: every 5 minutes
+      returns:
+        - GoogleCalendarEvent
+    google-calendars:
+      description: |
+        Sync the calendars list of the user.
+        Details: full sync, does support deletes. Sync goes back all time,
+        metadata not required.
+        Required scope(s): https://www.googleapis.com/auth/calendar.readonly
+      type: sync
+      track_deletes: true
+      runs: every hour
+      returns:
+        - GoogleCalendar
+    models:
+      GoogleCalendar:
+        kind: string
+        etag: string
+        id: string
+        summary: string
+        description: string
+        location: string
+        timeZone: string
+        summaryOverride: string
+        colorId: string
+        backgroundColor: string
+        foregroundColor: string
+        hidden: boolean
+        selected: boolean
+        accessRole: string
+        defaultReminders:
+          - method: string
+            minutes: integer
+        notificationSettings:
+          notifications:
+            - type: string
+              method: string
+        primary: boolean
+        deleted: boolean
+        conferenceProperties:
+          allowedConferenceSolutionTypes:
+            - string
+      GoogleCalendarEvent:
+        kind: string
+        etag: string
+        id: string
+        status: string
+        htmlLink: string
+        created: string
+        updated: string
+        summary: string
+        description: string
+        location: string
+        colorId: string
+        creator:
+          id: string
+          email: string
+          displayName: string
+          self: boolean
+        organizer:
+          id: string
+          email: string
+          displayName: string
+          self: boolean
+        start:
+          date: date
+          dateTime: string
+          timeZone: string
+        end:
+          date: date
+          string: string
+          timeZone: string
+        endTimeUnspecified: boolean
+        recurrence:
+          - string
+        recurringEventId: string
+        originalStartTime:
+          date: date
+          dateTime: string
+          timeZone: string
+        transparency: string
+        visibility: string
+        iCalUID: string
+        sequence: integer
+        attendees:
+          - id: string
+            email: string
+            displayName: string
+            organizer: boolean
+            self: boolean
+            resource: boolean
+            optional: boolean
+            responseStatus: string
+            comment: string
+            additionalGuests: integer
+        attendeesOmitted: boolean
+        extendedProperties:
+          private:
+            key: string
+          shared:
+            key: string
+        hangoutLink: string
+        conferenceData:
+          createRequest:
+            requestId: string
+            conferenceSolutionKey:
+              type: string
+            status:
+              statusCode: string
+          entryPoints:
+            - entryPointType: string
+              uri: string
+              label: string
+              pin: string
+              accessCode: string
+              meetingCode: string
+              passcode: string
+              password: string
+          conferenceSolution:
+            key:
+              type: string
+            name: string
+            iconUri: string
+          conferenceId: string
+          signature: string
+          notes: string
+        gadget:
+          type: string
+          title: string
+          link: string
+          iconLink: string
+          width: integer
+          height: integer
+          display: string
+          preferences:
+            key: string
+        anyoneCanAddSelf: boolean
+        guestsCanInviteOthers: boolean
+        guestsCanModify: boolean
+        guestsCanSeeOtherGuests: boolean
+        privateCopy: boolean
+        locked: boolean
+        reminders:
+          useDefault: boolean
+          overrides:
+            - method: string
+              minutes: integer
+        source:
+          url: string
+          title: string
+        workingLocationProperties:
+          type: string
+          homeOffice: string
+          customLocation:
+            label: string
+          officeLocation:
+            buildingId: string
+            floorId: string
+            floorSectionId: string
+            deskId: string
+            label: string
+        attachments:
+          - fileUrl: string
+            title: string
+            mimeType: string
+            iconLink: string
+            fileId: string
+        eventType: string
+  google-drive:
+    google-drive-documents:
+      type: sync
+      runs: every day
+      track_deletes: true
+      returns:
+        - Document
+      description: >
+        Sync all the content of google drive from a selected file or
+
+        folders. PDF files won't be parsed but rather should be fetched
+
+        via the proxy using the "google-drive-fetch-pdf" action.
+
+        Details: full sync, supports deletes, goes back all time. Metadata
+
+        required to filter on a particular folder, or file(s). Metadata
+
+        fields should be {"files": ["<some-id>"]} OR
+
+        {"folders": ["<some-id>"]}. The ID should be able to be provided
+
+        by using the Google Picker API
+        (https://developers.google.com/drive/picker/guides/overview)
+
+        and using the ID field provided by the response
+        (https://developers.google.com/drive/picker/reference/results)
+
+        Required scopes(s): https://www.googleapis.com/auth/drive.readonly
+    google-drive-fetch-pdf:
+      type: action
+      input: string
+      returns: string
+      description: |
+        Fetch PDF data given an ID using a responseStream, chunk the data
+        into a buffer and return a base64 encoded string that can later
+        be converted into a PDF using an external tool.
+        Required scope(s): https://www.googleapis.com/auth/drive.readonly
+    models:
+      Document:
+        id: string
+        url: string
+        content: string
+        title: string
+  google-mail:
     gmail-emails:
       runs: every hour
       returns:
@@ -207,6 +445,10 @@ integrations:
       runs: every half hour
       returns:
         - HubspotServiceTicket
+    hubspot-contacts:
+      runs: every day
+      returns:
+        - HubspotContact
     hubspot-owner:
       runs: every day
       returns:
@@ -255,6 +497,13 @@ integrations:
         category: string
         content: string
         publishDate: number
+      HubspotContact:
+        id: string
+        created_at: string
+        updated_at: string
+        first_name: string
+        last_name: string
+        email: string
   intercom:
     intercom-conversations:
       runs: every 6 hours
@@ -550,14 +799,31 @@ integrations:
   slack:
     slack-users:
       runs: every hour
+      description: >-
+        Syncs information about all Users on the Slack workspace. Scopes:
+        users:read
       returns:
         - SlackUser
     slack-channels:
       runs: every hour
+      description: >-
+        Syncs information about all Slack channels. Which channels get synced
+        (public, private, IMs, group DMs) dependson the scopes. If
+        joinPublicChannels is set to true, the bot will automatically join all
+        public channels as well. Scopes: At least one of channels:read,
+        groups:read, mpim:read, im:read. To also join public channels:
+        channels:join
       returns:
         - SlackChannel
     slack-messages:
       runs: every hour
+      description: >-
+        Syncs Slack messages, thread replies and reactions from messages &
+        thread replies for all channels, group dms and dms the bot is a part of.
+        For every channel it will do an initial full sync on first detection of
+        the channel. For subsequent runs it will sync messages, threads &
+        reactions from the last 10 days. Scopes required: channels:read, and at
+        least one of channels:history,groups:history,mpim:history,im:history
       returns:
         - SlackMessage
         - SlackMessageReply

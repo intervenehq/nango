@@ -8,7 +8,7 @@ description: 'Get real-time updates when new data is available.'
 
 You can configure Nango to send a webhook to your app every time a sync finishes and new data is available.
 
-To set this up go to [Project Settings page](https://app.nango.dev/project-settings) and set your webhook receive URL there.
+To set this up, go to [Project Settings page](https://app.nango.dev/project-settings) and set your webhook receive URL there.
 
 <Tip>
 You can change the webhook delivery so it sends every time a sync finishes regardless if new data is available in project settings.
@@ -24,13 +24,13 @@ The webhook from Nango is a POST request with the following body:
     "model": "<data-model>",                  // The name of the data model, e.g. ticket
     "responseResults": { "<DataModel>": { "added": 123, "updated": 123, "deleted": 123 } }, // The number of new/updated/deleted records, per object type.
     "syncType": "INITIAL" | "INCREMENTAL",   // "Initial" or "incremental" run
-    "queryTimeStamp": "2023-05-31T11:46:13.390Z", // Use this with "delta" in getRecords to fetch the data of this sync. Note that this property will be null for the initial sync job.
+    "queryTimeStamp": "2023-05-31T11:46:13.390Z", // Use this with "delta" in listRecords to fetch the data of this sync. Note that this property will be null for the initial sync job.
 }
 ```
 
-If your sync returns multiple models you may receive multiple webhooks for the same sync run (one for each model).
+If your sync returns multiple models, you may receive multiple webhooks for the same sync run (one for each model).
 
-For full type safety the `@nangohq/node` package exports a type annotation for the webhook. Example usage:
+For full type safety, the `@nangohq/node` package exports a type annotation for the webhook. Example usage:
 
 ```ts
 import express from 'express';

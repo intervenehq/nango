@@ -2,6 +2,13 @@ import { v2, client } from '@datadog/datadog-api-client';
 import { isCloud } from './utils.js';
 
 export enum MetricTypes {
+    AUTH_TOKEN_REFRESH_START = 'auth_token_refresh_start',
+    AUTH_TOKEN_REFRESH_SUCCESS = 'auth_token_refresh_success',
+    AUTH_TOKEN_REFRESH_FAILURE = 'auth_token_refresh_failure',
+    AUTH_TOKEN_REQUEST_START = 'auth_token_request_start',
+    AUTH_TOKEN_REQUEST_CALLBACK_RECEIVED = 'auth_token_request_callback_received',
+    AUTH_TOKEN_REQUEST_SUCCESS = 'auth_token_request_success',
+    AUTH_TOKEN_REQUEST_FAILURE = 'auth_token_request_failure',
     SYNC_OVERLAP = 'sync_overlap',
     SYNC_FAILURE = 'sync_failure',
     SYNC_SUCCESS = 'sync_success',
@@ -10,7 +17,16 @@ export enum MetricTypes {
     GET_CONNECTION_SUCCESS = 'get_connection_success',
     SYNC_DEPLOY_SUCCESS = 'sync_deploy_success',
     SYNC_DEPLOY_FAILURE = 'sync_deploy_failure',
-    SYNC_TRACK_RUNTIME = 'sync_script_track_runtime'
+    SYNC_TRACK_RUNTIME = 'sync_script_track_runtime',
+    SYNC_GET_RECORDS_OFFSET_USED = 'sync_get_records_offset_used',
+    SYNC_GET_RECORDS_SORT_BY_USED = 'sync_get_records_sort_by_used',
+    SYNC_GET_RECORDS_ORDER_USED = 'sync_get_records_order_used',
+    SYNC_GET_RECORDS_INCLUDE_METADATA_USED = 'sync_get_records_include_metadata_used',
+    SYNC_GET_RECORDS_DEPRECATED_METHOD_USED = 'sync_get_records_deprecated_method_used',
+    SYNC_GET_RECORDS_QUERY_TIMEOUT = 'sync_get_records_query_timeout',
+    FLOW_JOB_TIMEOUT_FAILURE = 'flow_job_failure',
+    POST_CONNECTION_SCRIPT_FAILURE = 'post_connection_script_failure',
+    INCOMING_WEBHOOK_RECEIVED = 'incoming_webhook_received'
 }
 
 class MetricsManager {

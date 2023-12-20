@@ -93,6 +93,10 @@ export function getServerBaseUrl() {
     return getServerHost() + `:${getServerPort()}`;
 }
 
+export function getRedisUrl() {
+    return process.env['NANGO_REDIS_URL'] || undefined;
+}
+
 export function isValidHttpUrl(str: string) {
     const pattern = new RegExp(
         '^(https?:\\/\\/)?' + // protocol
@@ -134,6 +138,14 @@ export function getBaseUrl() {
     return process.env['NANGO_SERVER_URL'] || localhostUrl;
 }
 
+export function getBasePublicUrl() {
+    if (process.env['NANGO_SERVER_PUBLIC_URL']) {
+        return process.env['NANGO_SERVER_PUBLIC_URL'].replace('api.', 'app.');
+    } else {
+        return getBaseUrl();
+    }
+}
+
 /**
  * Get Oauth callback url base url.
  * @desc for ease of use with APIs that require a secure redirect
@@ -162,6 +174,11 @@ export function getGlobalOAuthCallbackUrl() {
 export function getGlobalAppCallbackUrl() {
     const baseUrl = process.env['NANGO_SERVER_URL'] || getLocalOAuthCallbackUrlBaseUrl();
     return baseUrl + '/app-auth/connect';
+}
+
+export function getGlobalWebhookReceiveUrl() {
+    const baseUrl = process.env['NANGO_SERVER_URL'] || getLocalOAuthCallbackUrlBaseUrl();
+    return baseUrl + '/webhook';
 }
 
 export async function getOauthCallbackUrl(environmentId?: number) {

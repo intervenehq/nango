@@ -71,7 +71,6 @@ export default function IntegrationCreate() {
         }
     }, [isHmacEnabled, integration?.uniqueKey, connectionId, getHmacAPI]);
 
-
     useEffect(() => {
         const getIntegrations = async () => {
             let res = await getIntegrationListAPI();
@@ -441,7 +440,6 @@ nango.${integration?.authMode === AuthModes.None ? 'create' : 'auth'}('${integra
                                                     name="username"
                                                     optionalvalue={apiAuthUsername}
                                                     setoptionalvalue={setApiAuthUsername}
-                                                    required
                                                 />
                                             </div>
 

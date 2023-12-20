@@ -1,12 +1,13 @@
 {
     "name": "@nangohq/nango-server",
-    "version": "0.35.19",
+    "version": "0.36.63",
     "description": "Nango OAuth's server.",
     "type": "module",
     "main": "dist/server.js",
     "scripts": {
         "start": "tsc && node dist/server.js",
-        "dev": "nodemon"
+        "dev": "nodemon",
+        "nango": "cd nango-integrations && node ../../cli/dist/index.js"
     },
     "keywords": [],
     "repository": {
@@ -21,13 +22,14 @@
     },
     "dependencies": {
         "@hapi/boom": "^10.0.1",
-        "@nangohq/shared": "0.35.19",
+        "@nangohq/shared": "0.36.63",
         "@sentry/node": "^7.37.2",
         "@temporalio/client": "^1.7.4",
         "axios": "^1.3.4",
         "connect-session-knex": "^3.0.1",
         "cookie-parser": "^1.4.6",
         "cors": "^2.8.5",
+        "dd-trace": "4.20.0",
         "dotenv": "^16.0.3",
         "exponential-backoff": "^3.1.1",
         "express": "^4.18.2",
@@ -44,7 +46,7 @@
         "passport-http": "^0.3.0",
         "passport-local": "^1.0.0",
         "pg": "^8.8.0",
-        "posthog-node": "^2.3.0",
+        "posthog-node": "^3.1.3",
         "simple-oauth2": "^5.0.0",
         "uuid": "^9.0.0",
         "winston": "^3.8.2",
@@ -70,7 +72,6 @@
         "@types/uuid": "^8.3.4",
         "@types/ws": "^8.5.4",
         "nodemon": "^3.0.1",
-        "ts-node": "^10.9.1",
         "typescript": "^4.7.4"
     }
 }

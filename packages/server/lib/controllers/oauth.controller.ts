@@ -11,7 +11,7 @@ import {
 } from '../utils/utils.js';
 import {
     getConnectionConfig,
-    SyncClient,
+    connectionCreated as connectionCreatedHook,
     interpolateStringFromObject,
     getOauthCallbackUrl,
     getGlobalAppCallbackUrl,
@@ -42,11 +42,13 @@ import {
     providerClientManager,
     errorManager,
     analytics,
+    metricsManager,
+    MetricTypes,
     AnalyticsTypes,
     hmacService,
     ErrorSourceEnum
 } from '@nangohq/shared';
-import wsClient from '../clients/web-socket.client.js';
+import publisher from '../clients/publisher.client.js';
 import { WSErrBuilder } from '../utils/web-socket-error.js';
 import oAuthSessionService from '../services/oauth-session.service.js';
 
@@ -78,6 +80,13 @@ class OAuthController {
                 analytics.track(AnalyticsTypes.PRE_WS_OAUTH, accountId);
             }
 
+            await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_START, 'OAuth request process start', LogActionEnum.AUTH, {
+                environmentId: String(environmentId),
+                accountId: String(accountId),
+                providerConfigKey: String(providerConfigKey),
+                connectionId: String(connectionId)
+            });
+
             const callbackUrl = await getOauthCallbackUrl(environmentId);
             const connectionConfig = req.query['params'] != null ? getConnectionConfig(req.query['params']) : {};
             const authorizationParams = req.query['authorization_params'] != null ? getAdditionalAuthorizationParams(req.query['authorization_params']) : {};
@@ -91,7 +100,7 @@ class OAuthController {
                     content: WSErrBuilder.MissingConnectionId().message
                 });
 
-                return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.MissingConnectionId());
+                return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.MissingConnectionId());
             } else if (providerConfigKey == null) {
                 await createActivityLogMessageAndEnd({
                     level: 'error',
@@ -101,8 +110,9 @@ class OAuthController {
                     content: WSErrBuilder.MissingProviderConfigKey().message
                 });
 
-                return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.MissingProviderConfigKey());
+                return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.MissingProviderConfigKey());
             }
+
             connectionId = connectionId.toString();
 
             const hmacEnabled = await hmacService.isEnabled(environmentId);
@@ -117,9 +127,10 @@ class OAuthController {
                         content: WSErrBuilder.MissingHmac().message
                     });
 
-                    return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.MissingHmac());
+                    return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.MissingHmac());
                 }
                 const verified = await hmacService.verify(hmac, environmentId, providerConfigKey, connectionId);
+
                 if (!verified) {
                     await createActivityLogMessageAndEnd({
                         level: 'error',
@@ -129,7 +140,7 @@ class OAuthController {
                         content: WSErrBuilder.InvalidHmac().message
                     });
 
-                    return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.InvalidHmac());
+                    return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.InvalidHmac());
                 }
             }
 
@@ -160,7 +171,7 @@ class OAuthController {
                     url: callbackUrl
                 });
 
-                return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnknownProviderConfigKey(providerConfigKey));
+                return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnknownProviderConfigKey(providerConfigKey));
             }
 
             let template: ProviderTemplate;
@@ -176,7 +187,7 @@ class OAuthController {
                     url: callbackUrl
                 });
 
-                return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownProviderTemplate(config.provider));
+                return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownProviderTemplate(config.provider));
             }
 
             const session: OAuthSession = {
@@ -209,7 +220,7 @@ class OAuthController {
                     url: callbackUrl
                 });
 
-                return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.InvalidProviderConfig(providerConfigKey));
+                return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.InvalidProviderConfig(providerConfigKey));
             }
 
             if (template.auth_mode === ProviderAuthModes.OAuth2) {
@@ -241,7 +252,7 @@ class OAuthController {
                 url: callbackUrl
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownAuthMode(template.auth_mode));
+            return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownAuthMode(template.auth_mode));
         } catch (e) {
             const prettyError = JSON.stringify(e, ['message', 'name'], 2);
             await createActivityLogMessage({
@@ -262,7 +273,7 @@ class OAuthController {
                 }
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
+            return publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
         }
     }
 
@@ -279,7 +290,7 @@ class OAuthController {
         userScope?: string
     ) {
         const oauth2Template = template as ProviderTemplateOAuth2;
-        const wsClientId = session.webSocketClientId;
+        const channel = session.webSocketClientId;
         const providerConfigKey = session.providerConfigKey;
         const connectionId = session.connectionId;
 
@@ -298,9 +309,9 @@ class OAuthController {
                     }
                 });
 
-                return wsClient.notifyErr(
+                return publisher.notifyErr(
                     res,
-                    wsClientId,
+                    channel,
                     providerConfigKey,
                     connectionId,
                     WSErrBuilder.InvalidConnectionConfig(template.authorization_url, JSON.stringify(connectionConfig))
@@ -321,9 +332,9 @@ class OAuthController {
                     }
                 });
 
-                return wsClient.notifyErr(
+                return publisher.notifyErr(
                     res,
-                    wsClientId,
+                    channel,
                     providerConfigKey,
                     connectionId,
                     WSErrBuilder.InvalidConnectionConfig(template.token_url, JSON.stringify(connectionConfig))
@@ -371,6 +382,15 @@ class OAuthController {
                     ...allAuthParams
                 });
 
+                await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_CALLBACK_RECEIVED, 'OAuth2 callback url received', LogActionEnum.AUTH, {
+                    environmentId: String(environment_id),
+                    callbackUrl,
+                    providerConfigKey: String(providerConfigKey),
+                    provider: String(providerConfig.provider),
+                    connectionId: String(connectionId),
+                    authMode: String(template.auth_mode)
+                });
+
                 await createActivityLogMessage({
                     level: 'info',
                     environment_id,
@@ -410,12 +430,19 @@ class OAuthController {
                     }
                 });
 
-                return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownGrantType(grantType));
+                return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnkownGrantType(grantType));
             }
         } catch (error: any) {
             const prettyError = JSON.stringify(error, ['message', 'name'], 2);
 
             const content = WSErrBuilder.UnkownError().message + '\n' + prettyError;
+
+            await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_FAILURE, `OAuth2 request process failed ${content}`, LogActionEnum.AUTH, {
+                callbackUrl,
+                environmentId: String(environment_id),
+                providerConfigKey: String(providerConfigKey),
+                connectionId: String(connectionId)
+            });
 
             await createActivityLogMessage({
                 level: 'error',
@@ -430,7 +457,7 @@ class OAuthController {
                 }
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
         }
     }
 
@@ -443,7 +470,7 @@ class OAuthController {
         activityLogId: number,
         environment_id: number
     ) {
-        const wsClientId = session.webSocketClientId;
+        const channel = session.webSocketClientId;
         const providerConfigKey = session.providerConfigKey;
         const connectionId = session.connectionId;
 
@@ -466,9 +493,9 @@ class OAuthController {
                     }
                 });
 
-                return wsClient.notifyErr(
+                return publisher.notifyErr(
                     res,
-                    wsClientId,
+                    channel,
                     providerConfigKey,
                     connectionId,
                     WSErrBuilder.InvalidConnectionConfig(template.authorization_url, JSON.stringify(connectionConfig))
@@ -522,7 +549,7 @@ class OAuthController {
                 }
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
         }
     }
 
@@ -542,7 +569,7 @@ class OAuthController {
         const callbackParams = new URLSearchParams({
             state: session.id
         });
-        const wsClientId = session.webSocketClientId;
+        const channel = session.webSocketClientId;
         const providerConfigKey = session.providerConfigKey;
         const connectionId = session.connectionId;
 
@@ -585,7 +612,7 @@ class OAuthController {
                 }
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.TokenError());
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.TokenError());
         }
 
         session.requestTokenSecret = tokenResult.request_token_secret;
@@ -604,6 +631,15 @@ class OAuthController {
 
         // if they end the flow early, be sure to have an end time
         await addEndTimeActivityLog(activityLogId as number);
+
+        await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_CALLBACK_RECEIVED, 'OAuth1 callback url received', LogActionEnum.AUTH, {
+            environmentId: String(environment_id),
+            callbackUrl,
+            providerConfigKey: String(providerConfigKey),
+            provider: config.provider,
+            connectionId: String(connectionId),
+            authMode: String(template.auth_mode)
+        });
 
         // All worked, let's redirect the user to the authorization page
         return res.redirect(redirectUrl);
@@ -642,7 +678,7 @@ class OAuthController {
 
         const activityLogId = await findActivityLogBySession(session.id);
 
-        const wsClientId = session.webSocketClientId;
+        const channel = session.webSocketClientId;
         const providerConfigKey = session.providerConfigKey;
         const connectionId = session.connectionId;
 
@@ -679,7 +715,7 @@ class OAuthController {
                 url: req.originalUrl
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownAuthMode(session.authMode));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnkownAuthMode(session.authMode));
         } catch (e) {
             const prettyError = JSON.stringify(e, ['message', 'name'], 2);
 
@@ -703,7 +739,7 @@ class OAuthController {
                 }
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
         }
     }
 
@@ -719,7 +755,7 @@ class OAuthController {
         const { code } = req.query;
         const providerConfigKey = session.providerConfigKey;
         const connectionId = session.connectionId;
-        const wsClientId = session.webSocketClientId;
+        const channel = session.webSocketClientId;
         const callbackMetadata = getConnectionMetadataFromCallbackRequest(req.query, template);
 
         if (!code) {
@@ -736,7 +772,15 @@ class OAuthController {
                 }
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.InvalidCallbackOAuth2());
+            await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_FAILURE, 'OAuth2 token request failed with a missing code', LogActionEnum.AUTH, {
+                environmentId: String(environment_id),
+                providerConfigKey: String(providerConfigKey),
+                provider: String(config.provider),
+                connectionId: String(connectionId),
+                authMode: String(template.auth_mode)
+            });
+
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.InvalidCallbackOAuth2());
         }
 
         const simpleOAuthClient = new simpleOauth2.AuthorizationCode(oauth2Client.getSimpleOAuth2ClientConfig(config, template, session.connectionConfig));
@@ -819,7 +863,20 @@ class OAuthController {
                     timestamp: Date.now()
                 });
 
-                return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError());
+                await metricsManager.capture(
+                    MetricTypes.AUTH_TOKEN_REQUEST_FAILURE,
+                    'OAuth2 token request failed, response from the server could not be parsed',
+                    LogActionEnum.AUTH,
+                    {
+                        environmentId: String(environment_id),
+                        providerConfigKey: String(providerConfigKey),
+                        provider: String(config.provider),
+                        connectionId: String(connectionId),
+                        authMode: String(template.auth_mode)
+                    }
+                );
+
+                return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnkownError());
             }
 
             const accountId = (await environmentService.getAccountIdFromEnvironment(session.environmentId)) as number;
@@ -853,13 +910,28 @@ class OAuthController {
             });
 
             if (updatedConnection) {
-                const syncClient = await SyncClient.getInstance();
-                await syncClient?.initiate(updatedConnection.id);
+                await connectionCreatedHook(
+                    {
+                        id: updatedConnection.id,
+                        connection_id: connectionId,
+                        provider_config_key: providerConfigKey,
+                        environment_id
+                    },
+                    session.provider
+                );
             }
 
             await updateSuccessActivityLog(activityLogId, true);
 
-            return wsClient.notifySuccess(res, wsClientId, providerConfigKey, connectionId);
+            await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_SUCCESS, 'OAuth2 token request succeeded', LogActionEnum.AUTH, {
+                environmentId: String(environment_id),
+                providerConfigKey: String(providerConfigKey),
+                provider: String(config.provider),
+                connectionId: String(connectionId),
+                authMode: String(template.auth_mode)
+            });
+
+            return publisher.notifySuccess(res, channel, providerConfigKey, connectionId);
         } catch (e) {
             const prettyError = JSON.stringify(e, ['message', 'name'], 2);
             await errorManager.report(e, {
@@ -872,6 +944,14 @@ class OAuthController {
                 }
             });
 
+            await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_FAILURE, 'OAuth2 token request failed', LogActionEnum.AUTH, {
+                environmentId: String(environment_id),
+                providerConfigKey: String(providerConfigKey),
+                provider: String(config.provider),
+                connectionId: String(connectionId),
+                authMode: String(template.auth_mode)
+            });
+
             await createActivityLogMessageAndEnd({
                 level: 'error',
                 environment_id,
@@ -880,7 +960,7 @@ class OAuthController {
                 timestamp: Date.now()
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
         }
     }
 
@@ -896,7 +976,7 @@ class OAuthController {
         const { oauth_token, oauth_verifier } = req.query;
         const providerConfigKey = session.providerConfigKey;
         const connectionId = session.connectionId;
-        const wsClientId = session.webSocketClientId;
+        const channel = session.webSocketClientId;
         const metadata = getConnectionMetadataFromCallbackRequest(req.query, template);
 
         if (!oauth_token || !oauth_verifier) {
@@ -908,7 +988,7 @@ class OAuthController {
                 timestamp: Date.now()
             });
 
-            return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.InvalidCallbackOAuth1());
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.InvalidCallbackOAuth1());
         }
 
         const oauth_token_secret = session.requestTokenSecret!;
@@ -943,7 +1023,15 @@ class OAuthController {
                     url: session.callbackUrl
                 });
 
-                return wsClient.notifySuccess(res, wsClientId, providerConfigKey, connectionId);
+                await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_SUCCESS, 'OAuth1 token request succeeded', LogActionEnum.AUTH, {
+                    environmentId: String(environment_id),
+                    providerConfigKey: String(providerConfigKey),
+                    provider: String(config.provider),
+                    connectionId: String(connectionId),
+                    authMode: String(template.auth_mode)
+                });
+
+                return publisher.notifySuccess(res, channel, providerConfigKey, connectionId);
             })
             .catch(async (e) => {
                 errorManager.report(e, {
@@ -958,6 +1046,14 @@ class OAuthController {
                 });
                 const prettyError = JSON.stringify(e, ['message', 'name'], 2);
 
+                await metricsManager.capture(MetricTypes.AUTH_TOKEN_REQUEST_FAILURE, 'OAuth1 token request failed', LogActionEnum.AUTH, {
+                    environmentId: String(environment_id),
+                    providerConfigKey: String(providerConfigKey),
+                    provider: String(config.provider),
+                    connectionId: String(connectionId),
+                    authMode: String(template.auth_mode)
+                });
+
                 await createActivityLogMessageAndEnd({
                     level: 'error',
                     environment_id,
@@ -966,7 +1062,7 @@ class OAuthController {
                     timestamp: Date.now()
                 });
 
-                return wsClient.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
+                return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnkownError(prettyError));
             });
     }
 }

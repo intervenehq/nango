@@ -66,6 +66,25 @@ paths:
             responses:
                 '200':
                     description: Successfully created an integration
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required:
+                                    - config
+                                properties:
+                                    config:
+                                        type: object
+                                        required:
+                                            - unique_key
+                                            - provider
+                                        properties:
+                                            unique_key:
+                                                type: string
+                                                description: The integration ID that you created in Nango.
+                                            provider:
+                                                type: string
+                                                description: The Nango API Configuration.
                 '400':
                     description: Invalid request
                     content:
@@ -107,6 +126,25 @@ paths:
             responses:
                 '200':
                     description: Successfully edit an integration
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required:
+                                    - config
+                                properties:
+                                    config:
+                                        type: object
+                                        required:
+                                            - unique_key
+                                            - provider
+                                        properties:
+                                            unique_key:
+                                                type: string
+                                                description: The integration ID that you created in Nango.
+                                            provider:
+                                                type: string
+                                                description: The Nango API Configuration.
                 '400':
                     description: Invalid request
                     content:
@@ -182,24 +220,18 @@ paths:
                                                 items:
                                                     type: object
                                                     properties:
-                                                        id:
-                                                            type: string
-                                                            description: The unique ID for the sync.
                                                         name:
                                                             type: string
                                                             description: The name of the sync.
-                                                        connection_id:
-                                                            type: string
-                                                            description: The name of the connection id.
                                                         created_at:
                                                             type: string
                                                             description: The creation timestamp of the sync.
                                                         updated_at:
                                                             type: string
                                                             description: The last updated timestamp of the sync.
-                                                        last_sync_date:
+                                                        description:
                                                             type: string
-                                                            description: The timestamp of the last completed sync.
+                                                            description: Description of what the sync does and details about it
                 '400':
                     description: Invalid request
                     content:
@@ -289,6 +321,10 @@ paths:
                                                 created:
                                                     type: string
                                                     description: Connection creation date.
+                                                metadata:
+                                                    type: object
+                                                    description: Custom metadata attached to the connection
+
         post:
             description: Adds a connection for which you already have an access token
             requestBody:
@@ -473,6 +509,142 @@ paths:
                                     message:
                                         type: string
 
+        patch:
+            description: Update custom metadata for the connection.
+            parameters:
+                - name: connectionId
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+                  description: The connection ID used to create the connection.
+                - name: Provider-Config-Key
+                  in: header
+                  required: true
+                  description: The integration ID used to create the connection (aka Unique Key).
+                  schema:
+                      type: string
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            type: object
+            responses:
+                '200':
+                    description: Successfully updated the metadata
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                '400':
+                    description: Invalid request
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    message:
+                                        type: string
+
+    /records:
+        get:
+            description: Returns data synced with Nango Sync
+            parameters:
+                - name: model
+                  in: query
+                  required: true
+                  schema:
+                      type: string
+                  description: The data model to fetch
+                - name: delta
+                  in: query
+                  required: false
+                  schema:
+                      type: string
+                  description: Timestamp, e.g. 2023-05-31T11:46:13.390Z. If passed only records added or updated after this timestamp are returned, otherwise all records are returned.
+                - name: limit
+                  in: query
+                  required: false
+                  schema:
+                      type: integer
+                  description: The maximum number of records to return. If not passed, all records are returned.
+                - name: cursor
+                  in: query
+                  required: false
+                  schema:
+                      type: string
+                  description: |
+                    Base 64 encoded value that can be used to fetch the next page of results. The cursor will be included until there are no more results to paginate through.
+                - name: filter
+                  in: query
+                  required: false
+                  schema:
+                      type: string
+                      enum: [added, updated, deleted]
+                  description: Filter to only show results that have been added or updated or deleted. Helpful when used in conjuction with the delta parameter to retrieve a subset or records that were added, updated, or deleted with the latest sync.
+                - name: Connection-Id
+                  in: header
+                  required: true
+                  description: The connection ID used to create the connection.
+                  schema:
+                      type: string
+                - name: Provider-Config-Key
+                  in: header
+                  required: true
+                  description: The integration ID used to create the connection (aka Unique Key).
+                  schema:
+                      type: string
+
+            responses:
+                '200':
+                    description: Successfully returned records
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    records:
+                                        type: array
+                                        items:
+                                            type: object
+                                            properties:
+                                                your-properties:
+                                                    type: string
+                                                    description: The data Nango synced in for you
+                                                    example: "Your synced data, in the schema you (or Nango) defined in nango.yaml"
+                                                _nango_metadata:
+                                                    type: object
+                                                    properties:
+                                                        deleted_at:
+                                                            type: string
+                                                            nullable: true
+                                                            description: The timestamp at which Nango detected the record as deleted
+                                                        last_action:
+                                                            type: string
+                                                            description: The last action seen on this record
+                                                            enum: ["ADDED", "UPDATED", "DELETED"]
+                                                        first_seen_at:
+                                                            type: string
+                                                            description: The timestamp at which Nango first saw this record
+                                                            example: "2023-09-18T15:20:35.941305+00:00"
+                                                        last_modified_at:
+                                                            type: string
+                                                            description: The timestamp at which Nango last detected a change to this record
+                                                            example: "2023-09-18T15:20:35.941305+00:00"
+                                    next_cursor:
+                                        type: string
+                                        description: The base64-encoded cursor for pagination
+                                        example: "MjAyMy0xMS0xN1QxMTo0NzoxNC40NDcrMDI6MDB8fDAzZTA1NzIxLWNiZmQtNGYxNS1iYTNhLWFlNjM2Y2MwNmEw=="
+                '400':
+                    description: Invalid request
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    message:
+                                        type: string
     /sync/records:
         get:
             description: Returns data synced with Nango Sync
@@ -534,6 +706,49 @@ paths:
                   description: The integration ID used to create the connection (aka Unique Key).
                   schema:
                       type: string
+
+            responses:
+                '200':
+                    description: Successfully returned records
+                    content:
+                        application/json:
+                            schema:
+                                type: array
+                                items:
+                                    type: object
+                                    properties:
+                                        your-properties:
+                                            type: string
+                                            description: The data Nango synced in for you
+                                            example: "Your synced data, in the schema you (or Nango) defined in nango.yaml"
+                                        _nango_metadata:
+                                            type: object
+                                            properties:
+                                                deleted_at:
+                                                    type: string
+                                                    nullable: true
+                                                    description: The timestamp at which Nango detected the record as deleted
+                                                last_action:
+                                                    type: string
+                                                    description: The last action seen on this record
+                                                    enum: ["ADDED", "UPDATED", "DELETED"]
+                                                first_seen_at:
+                                                    type: string
+                                                    description: The timestamp at which Nango first saw this record
+                                                    example: "2023-09-18T15:20:35.941305+00:00"
+                                                last_modified_at:
+                                                    type: string
+                                                    description: The timestamp at which Nango last detected a change to this record
+                                                    example: "2023-09-18T15:20:35.941305+00:00"
+                '400':
+                    description: Invalid request
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    message:
+                                        type: string
     /sync/trigger:
         post:
             description: Triggers an additional, one-off execution of specified sync(s) (for a given connection or all applicable connections if no connection is specified).
@@ -557,6 +772,19 @@ paths:
                                     descriptions: A list of sync names that you wish to trigger.
                                     items:
                                         type: string
+            responses:
+                '200':
+                    description: Successfully triggered the sync
+                '400':
+                    description: Invalid request
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    message:
+                                        type: string
+
     /sync/start:
         post:
             description: Starts the continuous execution of specified sync(s) (for a given connection or all applicable connections if no connection is specified).
@@ -579,6 +807,18 @@ paths:
                                     type: array
                                     descriptions: A list of sync names that you wish to start.
                                     items:
+                                        type: string
+            responses:
+                '200':
+                    description: Successfully started the sync
+                '400':
+                    description: Invalid request
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    message:
                                         type: string
     /sync/pause:
         post:
@@ -603,6 +843,19 @@ paths:
                                     descriptions: A list of sync names that you wish to pause.
                                     items:
                                         type: string
+            responses:
+                '200':
+                    description: Successfully paused the sync
+                '400':
+                    description: Invalid request
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    message:
+                                        type: string
+
     /sync/status:
         get:
             description: Get the status of specified sync(s) (for a given connection or all applicable connections if no connection is specified)
@@ -648,10 +901,28 @@ paths:
                                                     type: string
                                                     enum: ["RUNNING", "PAUSED", "STOPPED", "SUCCESS", "ERROR"]
                                                     description: The current status of the sync.
+                                                type:
+                                                    type: string
+                                                    description: The most recent sync type completed
+                                                    enum: ["INCREMENTAL", "INITIAL"]
+                                                finishedAt:
+                                                    type: string
+                                                    description: ISO string of the most recently completed sync
+                                                nextScheduledSyncAt:
+                                                    type: string
+                                                    description: ISO string of the next scheduled sync time
                                                 latestResult:
                                                     type: object
                                                     description: Additional information regarding the latest result of the sync. Contains a model name with added, updated and deleted records
-                                                    additionalProperties:
+                '400':
+                    description: Invalid request
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    message:
+                                        type: string
     /action/trigger:
         post:
             description: Triggers an action for a connection
@@ -683,9 +954,54 @@ paths:
                                 input:
                                     type: object
                                     description: The necessary input for your action's 'runAction' function.
+
+            responses:
+                '200':
+                    description: Returns the result of the action
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    your-properties:
+                                        type: string
+                                        description: The data returned by the action
+                                        example: "The data returned by the action"
+
+                '400':
+                    description: Invalid request
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    message:
+                                        type: string
+
+
     /environment-variables:
         get:
-            description: Retrieve the environment variables as inputted in the Nango dashboard
+            description: Retrieve the environment variables as added in the Nango dashboard
+            responses:
+                '200':
+                    description: Retrieve the environment variables as added in the Nango dashboard
+                    content:
+                        application/json:
+                            schema:
+                                type: array
+                                items:
+                                    type: object
+                                    properties:
+                                        name:
+                                            type: string
+                                            description: The name of the environment variable
+                                            example: "MY_SECRET_KEY"
+                                        value:
+                                            type: string
+                                            description: The value of the environment variable
+                                            example: "SK_373892NSHFNCOWFO..."
+
+
     /proxy/{anyPath}:
         get:
             description: Make a GET request with the Proxy.
@@ -732,6 +1048,9 @@ paths:
                   schema:
                       type: string
                   description: Any other headers you send are passed on to the external API
+            responses:
+                '200':
+                    description: The response exactly as returned by the external API
         post:
             description: Make a POST request with the Proxy.
             parameters:
@@ -780,6 +1099,9 @@ paths:
                             properties:
                                 $ANY_BODY_PARAMS:
                                     type: string
+            responses:
+                '200':
+                    description: The response exactly as returned by the external API
         put:
             description: Make a PUT request with the Proxy.
             parameters:
@@ -828,6 +1150,9 @@ paths:
                             properties:
                                 $ANY_BODY_PARAMS:
                                     type: string
+            responses:
+                '200':
+                    description: The response exactly as returned by the external API
         patch:
             description: Make a PATCH request with the Proxy.
             parameters:
@@ -876,6 +1201,9 @@ paths:
                             properties:
                                 $ANY_BODY_PARAMS:
                                     type: string
+            responses:
+                '200':
+                    description: The response exactly as returned by the external API
         delete:
             description: Make a DELETE request with the Proxy.
             parameters:
@@ -921,3 +1249,6 @@ paths:
                   schema:
                       type: string
                   description: Any other headers you send are passed on to the external API
+            responses:
+                '200':
+                    description: The response exactly as returned by the external API

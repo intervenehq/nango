@@ -3,6 +3,7 @@
  */
 
 // Import environment variables (if running server locally).
+import './apm.js';
 import _ from './utils/config.js';
 import oauthController from './controllers/oauth.controller.js';
 import configController from './controllers/config.controller.js';
@@ -18,14 +19,16 @@ import syncController from './controllers/sync.controller.js';
 import flowController from './controllers/flow.controller.js';
 import apiAuthController from './controllers/apiAuth.controller.js';
 import appAuthController from './controllers/appAuth.controller.js';
+import onboardingController from './controllers/onboarding.controller.js';
+import webhookController from './controllers/webhook.controller.js';
 import path from 'path';
 import { packageJsonFile, dirname } from './utils/utils.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 import express from 'express';
 import cors from 'cors';
-import webSocketClient from './clients/web-socket.client.js';
 import { AuthClient } from './clients/auth.client.js';
+import publisher from './clients/publisher.client.js';
 import passport from 'passport';
 import environmentController from './controllers/environment.controller.js';
 import accountController from './controllers/account.controller.js';
@@ -73,6 +76,7 @@ app.get('/health', (_, res) => {
 app.route('/oauth/callback').get(oauthController.oauthCallback.bind(oauthController));
 app.route('/app-auth/connect').get(appAuthController.connect.bind(appAuthController));
 app.route('/oauth/connect/:providerConfigKey').get(apiPublicAuth, oauthController.oauthRequest.bind(oauthController));
+app.route('/webhook/:environmentUuid/:providerConfigKey').post(webhookController.receive.bind(proxyController));
 app.route('/api-auth/api-key/:providerConfigKey').post(apiPublicAuth, apiAuthController.apiKey.bind(authController));
 app.route('/api-auth/basic/:providerConfigKey').post(apiPublicAuth, apiAuthController.basic.bind(authController));
 app.route('/unauth/:providerConfigKey').post(apiPublicAuth, unAuthController.create.bind(unAuthController));
@@ -89,11 +93,13 @@ app.route('/connection/:connectionId').get(apiAuth, connectionController.getConn
 app.route('/connection').get(apiAuth, connectionController.listConnections.bind(connectionController));
 app.route('/connection/:connectionId').delete(apiAuth, connectionController.deleteConnection.bind(connectionController));
 app.route('/connection/:connectionId/metadata').post(apiAuth, connectionController.setMetadata.bind(connectionController));
+app.route('/connection/:connectionId/metadata').patch(apiAuth, connectionController.updateMetadata.bind(connectionController));
 app.route('/connection').post(apiAuth, connectionController.createConnection.bind(connectionController));
 app.route('/environment-variables').get(apiAuth, environmentController.getEnvironmentVariables.bind(connectionController));
 app.route('/sync/deploy').post(apiAuth, syncController.deploySync.bind(syncController));
 app.route('/sync/deploy/confirmation').post(apiAuth, syncController.confirmation.bind(syncController));
-app.route('/sync/records').get(apiAuth, syncController.getRecords.bind(syncController));
+app.route('/sync/records').get(apiAuth, syncController.getRecords.bind(syncController)); //TODO: to deprecate
+app.route('/records').get(apiAuth, syncController.getAllRecords.bind(syncController));
 app.route('/sync/trigger').post(apiAuth, syncController.trigger.bind(syncController));
 app.route('/sync/pause').post(apiAuth, syncController.pause.bind(syncController));
 app.route('/sync/start').post(apiAuth, syncController.start.bind(syncController));
@@ -101,7 +107,9 @@ app.route('/sync/provider').get(apiAuth, syncController.getSyncProvider.bind(syn
 app.route('/sync/status').get(apiAuth, syncController.getSyncStatus.bind(syncController));
 app.route('/flow/attributes').get(apiAuth, syncController.getFlowAttributes.bind(syncController));
 app.route('/flow/configs').get(apiAuth, flowController.getFlowConfig.bind(flowController));
-app.route('/action/trigger').post(apiAuth, syncController.triggerAction.bind(syncController));
+app.route('/action/trigger').post(apiAuth, syncController.triggerAction.bind(syncController)); //TODO: to deprecate
+
+app.route('/v1/*').all(apiAuth, syncController.actionOrModel.bind(syncController));
 
 app.route('/admin/flow/deploy/pre-built').post(apiAuth, flowController.adminDeployPrivateFlow.bind(flowController));
 
@@ -123,39 +131,56 @@ app.route('/api/v1/meta').get(webAuth, environmentController.meta.bind(environme
 app.route('/api/v1/account').get(webAuth, accountController.getAccount.bind(accountController));
 app.route('/api/v1/account').put(webAuth, accountController.editAccount.bind(accountController));
 app.route('/api/v1/account/admin/switch').post(webAuth, accountController.switchAccount.bind(accountController));
+
 app.route('/api/v1/environment').get(webAuth, environmentController.getEnvironment.bind(environmentController));
 app.route('/api/v1/environment/callback').post(webAuth, environmentController.updateCallback.bind(environmentController));
 app.route('/api/v1/environment/webhook').post(webAuth, environmentController.updateWebhookURL.bind(environmentController));
 app.route('/api/v1/environment/hmac').get(webAuth, environmentController.getHmacDigest.bind(environmentController));
 app.route('/api/v1/environment/hmac-enabled').post(webAuth, environmentController.updateHmacEnabled.bind(environmentController));
 app.route('/api/v1/environment/webhook-send').post(webAuth, environmentController.updateAlwaysSendWebhook.bind(environmentController));
+app.route('/api/v1/environment/slack-notifications-enabled').post(webAuth, environmentController.updateSlackNotificationsEnabled.bind(environmentController));
 app.route('/api/v1/environment/hmac-key').post(webAuth, environmentController.updateHmacKey.bind(environmentController));
 app.route('/api/v1/environment/environment-variables').post(webAuth, environmentController.updateEnvironmentVariables.bind(environmentController));
 app.route('/api/v1/environment/rotate-key').post(webAuth, environmentController.rotateKey.bind(accountController));
 app.route('/api/v1/environment/revert-key').post(webAuth, environmentController.revertKey.bind(accountController));
 app.route('/api/v1/environment/activate-key').post(webAuth, environmentController.activateKey.bind(accountController));
+app.route('/api/v1/environment/admin-auth').get(webAuth, environmentController.getAdminAuthInfo.bind(environmentController));
+
 app.route('/api/v1/integration').get(webAuth, configController.listProviderConfigsWeb.bind(configController));
 app.route('/api/v1/integration/:providerConfigKey').get(webAuth, configController.getProviderConfig.bind(configController));
 app.route('/api/v1/integration').put(webAuth, configController.editProviderConfigWeb.bind(connectionController));
 app.route('/api/v1/integration').post(webAuth, configController.createProviderConfig.bind(configController));
 app.route('/api/v1/integration/:providerConfigKey').delete(webAuth, configController.deleteProviderConfig.bind(connectionController));
+
 app.route('/api/v1/provider').get(connectionController.listProviders.bind(connectionController));
+
 app.route('/api/v1/connection').get(webAuth, connectionController.listConnections.bind(connectionController));
 app.route('/api/v1/connection/:connectionId').get(webAuth, connectionController.getConnectionWeb.bind(connectionController));
 app.route('/api/v1/connection/:connectionId').delete(webAuth, connectionController.deleteConnection.bind(connectionController));
+app.route('/api/v1/connection/admin/:connectionId').delete(webAuth, connectionController.deleteAdminConnection.bind(connectionController));
+
 app.route('/api/v1/user').get(webAuth, userController.getUser.bind(userController));
 app.route('/api/v1/user/name').put(webAuth, userController.editName.bind(userController));
 app.route('/api/v1/user/password').put(webAuth, userController.editPassword.bind(userController));
 app.route('/api/v1/users/:userId/suspend').post(webAuth, userController.suspend.bind(userController));
 app.route('/api/v1/users/invite').post(webAuth, userController.invite.bind(userController));
+
 app.route('/api/v1/activity').get(webAuth, activityController.retrieve.bind(activityController));
 app.route('/api/v1/activity-messages').get(webAuth, activityController.getMessages.bind(activityController));
+
 app.route('/api/v1/sync').get(webAuth, syncController.getSyncsByParams.bind(syncController));
 app.route('/api/v1/sync/command').post(webAuth, syncController.syncCommand.bind(syncController));
 app.route('/api/v1/syncs').get(webAuth, syncController.getSyncs.bind(syncController));
 app.route('/api/v1/flows').get(webAuth, flowController.getFlows.bind(syncController));
 app.route('/api/v1/flow/deploy/pre-built').post(webAuth, flowController.deployPreBuiltFlow.bind(flowController));
 app.route('/api/v1/flow/download').post(webAuth, flowController.downloadFlow.bind(flowController));
+app.route('/api/v1/flow/:id').delete(webAuth, flowController.deleteFlow.bind(flowController));
+
+app.route('/api/v1/onboarding').get(webAuth, onboardingController.status.bind(onboardingController));
+app.route('/api/v1/onboarding').post(webAuth, onboardingController.init.bind(onboardingController));
+app.route('/api/v1/onboarding/verify').post(webAuth, onboardingController.verify.bind(onboardingController));
+app.route('/api/v1/onboarding/:id').put(webAuth, onboardingController.updateStatus.bind(onboardingController));
+app.route('/api/v1/onboarding/sync-status').get(webAuth, onboardingController.checkSyncCompletion.bind(onboardingController));
 
 // Hosted signin
 if (!isCloud()) {
@@ -178,10 +203,10 @@ app.get('*', (_, res) => {
 });
 
 const server = http.createServer(app);
-const wsServer = new WebSocketServer({ server, path: getWebsocketsPath() });
+const wss = new WebSocketServer({ server, path: getWebsocketsPath() });
 
-wsServer.on('connection', (ws: WebSocket) => {
-    webSocketClient.addClient(ws);
+wss.on('connection', async (ws: WebSocket) => {
+    await publisher.subscribe(ws);
 });
 
 // kick off any job

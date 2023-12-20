@@ -9,7 +9,6 @@ import type {
     Config as ProviderConfig,
     AuthCredentials,
     OAuth1Credentials,
-    CredentialsRefresh,
     LogAction
 } from '../models/index.js';
 import {
@@ -26,7 +25,7 @@ import environmentService from '../services/environment.service.js';
 import { getFreshOAuth2Credentials } from '../clients/oauth2.client.js';
 import { NangoError } from '../utils/error.js';
 
-import type { Metadata, Connection, StoredConnection, BaseConnection, NangoConnection } from '../models/Connection.js';
+import type { Metadata, ConnectionConfig, Connection, StoredConnection, BaseConnection, NangoConnection } from '../models/Connection.js';
 import type { ServiceResponse } from '../models/Generic.js';
 import encryptionManager from '../utils/encryption.manager.js';
 import metricsManager, { MetricTypes } from '../utils/metrics.manager.js';
@@ -39,11 +38,19 @@ import {
     BasicApiCredentials
 } from '../models/Auth.js';
 import { schema } from '../db/database.js';
-import { interpolateStringFromObject, parseTokenExpirationDate, isTokenExpired } from '../utils/utils.js';
-import SyncClient from '../clients/sync.client.js';
+import { interpolateStringFromObject, parseTokenExpirationDate, isTokenExpired, getRedisUrl } from '../utils/utils.js';
+import { connectionCreated as connectionCreatedHook } from '../hooks/hooks.js';
+import { Locking } from '../utils/lock/locking.js';
+import { InMemoryKVStore } from '../utils/kvstore/InMemoryStore.js';
+import { RedisKVStore } from '../utils/kvstore/RedisStore.js';
+import type { KVStore } from '../utils/kvstore/KVStore.js';
 
 class ConnectionService {
-    private runningCredentialsRefreshes: CredentialsRefresh[] = [];
+    private locking: Locking;
+
+    constructor(locking: Locking) {
+        this.locking = locking;
+    }
 
     public async upsertConnection(
         connectionId: string,
@@ -54,7 +61,7 @@ class ConnectionService {
         environment_id: number,
         accountId: number,
         metadata?: Metadata
-    ) {
+    ): Promise<{ id: number }[]> {
         const storedConnection = await this.checkIfConnectionExists(connectionId, providerConfigKey, environment_id);
 
         if (storedConnection) {
@@ -201,8 +208,15 @@ class ConnectionService {
         );
 
         if (importedConnection) {
-            const syncClient = await SyncClient.getInstance();
-            syncClient?.initiate(importedConnection[0]?.id as number);
+            await connectionCreatedHook(
+                {
+                    id: importedConnection[0]?.id as number,
+                    connection_id,
+                    provider_config_key,
+                    environment_id: environmentId
+                },
+                provider
+            );
         }
 
         return importedConnection;
@@ -225,8 +239,15 @@ class ConnectionService {
         const importedConnection = await this.upsertApiConnection(connection_id, provider_config_key, provider, credentials, {}, environmentId, accountId);
 
         if (importedConnection) {
-            const syncClient = await SyncClient.getInstance();
-            syncClient?.initiate(importedConnection[0].id);
+            await connectionCreatedHook(
+                {
+                    id: importedConnection[0].id,
+                    connection_id,
+                    provider_config_key,
+                    environment_id: environmentId
+                },
+                provider
+            );
         }
 
         return importedConnection;
@@ -369,11 +390,26 @@ class ConnectionService {
         return result[0].metadata;
     }
 
+    public async getConnectionConfig(connection: Connection): Promise<ConnectionConfig> {
+        const result = await db.knex.withSchema(db.schema()).from<StoredConnection>(`_nango_connections`).select('connection_config').where({
+            connection_id: connection.connection_id,
+            provider_config_key: connection.provider_config_key,
+            environment_id: connection.environment_id,
+            deleted: false
+        });
+
+        if (!result || result.length == 0 || !result[0]) {
+            return {};
+        }
+
+        return result[0].connection_config;
+    }
+
     public async getConnectionsByEnvironmentAndConfig(environment_id: number, providerConfigKey: string): Promise<NangoConnection[]> {
         const result = await db.knex
             .withSchema(db.schema())
             .from<StoredConnection>(`_nango_connections`)
-            .select('id', 'connection_id', 'provider_config_key', 'environment_id')
+            .select('id', 'connection_id', 'provider_config_key', 'environment_id', 'connection_config')
             .where({ environment_id, provider_config_key: providerConfigKey, deleted: false });
 
         if (!result || result.length == 0 || !result[0]) {
@@ -383,7 +419,7 @@ class ConnectionService {
         return result;
     }
 
-    public async updateMetadata(connection: Connection, metadata: Metadata) {
+    public async replaceMetadata(connection: Connection, metadata: Metadata) {
         await db.knex
             .withSchema(db.schema())
             .from<StoredConnection>(`_nango_connections`)
@@ -391,14 +427,52 @@ class ConnectionService {
             .update({ metadata });
     }
 
+    public async replaceConnectionConfig(connection: Connection, config: ConnectionConfig) {
+        await db.knex
+            .withSchema(db.schema())
+            .from<StoredConnection>(`_nango_connections`)
+            .where({ id: connection.id as number, deleted: false })
+            .update({ connection_config: config });
+    }
+
+    public async updateMetadata(connection: Connection, metadata: Metadata): Promise<Metadata> {
+        const existingMetadata = await this.getMetadata(connection);
+        const newMetadata = { ...existingMetadata, ...metadata };
+        await this.replaceMetadata(connection, newMetadata);
+
+        return newMetadata;
+    }
+
+    public async updateConnectionConfig(connection: Connection, config: ConnectionConfig): Promise<ConnectionConfig> {
+        const existingConfig = await this.getConnectionConfig(connection);
+        const newConfig = { ...existingConfig, ...config };
+        await this.replaceConnectionConfig(connection, newConfig);
+
+        return newConfig;
+    }
+
+    public async findConnectionByConnectionConfigValue(key: string, value: string): Promise<Connection | null> {
+        const result = await db.knex
+            .withSchema(db.schema())
+            .from<StoredConnection>(`_nango_connections`)
+            .select('*')
+            .whereRaw(`connection_config->>? = ? AND deleted = false`, [key, value]);
+
+        if (!result || result.length == 0 || !result[0]) {
+            return null;
+        }
+
+        return encryptionManager.decryptConnection(result[0]);
+    }
+
     public async listConnections(
         environment_id: number,
         connectionId?: string
-    ): Promise<{ id: number; connection_id: number; provider: string; created: string }[]> {
+    ): Promise<{ id: number; connection_id: string; provider: string; created: string; metadata: Metadata }[]> {
         const queryBuilder = db.knex
             .withSchema(db.schema())
             .from<Connection>(`_nango_connections`)
-            .select({ id: 'id' }, { connection_id: 'connection_id' }, { provider: 'provider_config_key' }, { created: 'created_at' })
+            .select({ id: 'id' }, { connection_id: 'connection_id' }, { provider: 'provider_config_key' }, { created: 'created_at' }, 'metadata')
             .where({ environment_id, deleted: false });
         if (connectionId) {
             queryBuilder.where({ connection_id: connectionId });
@@ -514,12 +588,8 @@ class ConnectionService {
         return { success: true, error: null, response: connection };
     }
 
-    public async updateLastFetched(connectionId: number) {
-        await db.knex
-            .withSchema(db.schema())
-            .from<Connection>(`_nango_connections`)
-            .where({ id: connectionId, deleted: false })
-            .update({ last_fetched_at: new Date() });
+    public async updateLastFetched(id: number) {
+        await db.knex.withSchema(db.schema()).from<Connection>(`_nango_connections`).where({ id, deleted: false }).update({ last_fetched_at: new Date() });
     }
 
     // Parses and arbitrary object (e.g. a server response or a user provided auth object) into AuthCredentials.
@@ -582,39 +652,79 @@ class ConnectionService {
         const credentials = connection.credentials as OAuth2Credentials;
         const providerConfigKey = connection.provider_config_key;
 
-        const runningRefresh = this.findRunningRefresh(connectionId, providerConfigKey);
-        if (runningRefresh) {
-            return runningRefresh.promise;
-        }
-
         const shouldRefresh = await this.shouldRefreshCredentials(connection, credentials, providerConfig, template, instantRefresh);
 
         if (shouldRefresh) {
+            await metricsManager.capture(MetricTypes.AUTH_TOKEN_REFRESH_START, 'Token refresh is being started', LogActionEnum.AUTH, {
+                environmentId: String(environment_id),
+                connectionId,
+                providerConfigKey,
+                provider: providerConfig.provider
+            });
+            // We must ensure that only one refresh is running at a time accross all instances.
+            // Using a simple redis entry as a lock with a TTL to ensure it is always released.
+            // NOTES:
+            // - This is not a distributed lock and will not work in a multi-redis environment.
+            // - It could also be unsafe in case of a Redis crash.
+            // We are using this for now as it is a simple solution that should work for most cases.
+            const lockKey = `lock:refresh:${environment_id}:${providerConfigKey}:${connectionId}`;
             try {
+                const ttlInMs = 10000;
+                const acquitistionTimeoutMs = ttlInMs * 1.2; // giving some extra time for the lock to be released
+                await this.locking.tryAcquire(lockKey, ttlInMs, acquitistionTimeoutMs);
+
                 const { success, error, response: newCredentials } = await this.getNewCredentials(connection, providerConfig, template);
                 if (!success || !newCredentials) {
-                    this.removeFromRunningRefreshes(connectionId, providerConfigKey);
+                    await metricsManager.capture(MetricTypes.AUTH_TOKEN_REFRESH_FAILURE, `Token refresh failed, ${error?.message}`, LogActionEnum.AUTH, {
+                        environmentId: String(environment_id),
+                        connectionId,
+                        providerConfigKey,
+                        provider: providerConfig.provider
+                    });
+
                     return { success, error, response: null };
                 }
                 connection.credentials = newCredentials;
                 await this.updateConnection(connection);
-                this.removeFromRunningRefreshes(connectionId, providerConfigKey);
 
                 if (activityLogId && logAction === 'token') {
                     await this.logActivity(activityLogId, environment_id, `Token was refreshed for ${providerConfigKey} and connection ${connectionId}`);
                 }
 
-                return { success: true, error: null, response: newCredentials };
-            } catch (e) {
-                this.removeFromRunningRefreshes(connectionId, providerConfigKey);
+                await metricsManager.capture(MetricTypes.AUTH_TOKEN_REFRESH_SUCCESS, 'Token refresh was successful', LogActionEnum.AUTH, {
+                    environmentId: String(environment_id),
+                    connectionId,
+                    providerConfigKey,
+                    provider: providerConfig.provider
+                });
 
+                return { success: true, error: null, response: newCredentials };
+            } catch (e: any) {
                 if (activityLogId && logAction === 'token') {
                     await this.logErrorActivity(activityLogId, environment_id, `Refresh oauth2 token call failed`);
                 }
 
+                const errorMessage = e.message || 'Unknown error';
+                const errorDetails = {
+                    message: errorMessage,
+                    name: e.name || 'Error',
+                    stack: e.stack || 'No stack trace'
+                };
+
+                const errorString = JSON.stringify(errorDetails);
+
+                await metricsManager.capture(MetricTypes.AUTH_TOKEN_REFRESH_FAILURE, `Token refresh failed, ${errorString}`, LogActionEnum.AUTH, {
+                    environmentId: String(environment_id),
+                    connectionId,
+                    providerConfigKey,
+                    provider: providerConfig.provider
+                });
+
                 const error = new NangoError('refresh_token_external_error', e as Error);
 
                 return { success: false, error, response: null };
+            } finally {
+                this.locking.release(lockKey);
             }
         }
 
@@ -674,10 +784,6 @@ class ConnectionService {
         }
     }
 
-    private findRunningRefresh(connectionId: string, providerConfigKey: string): CredentialsRefresh | undefined {
-        return this.runningCredentialsRefreshes.find((refresh) => refresh.connectionId === connectionId && refresh.providerConfigKey === providerConfigKey);
-    }
-
     private async shouldRefreshCredentials(
         connection: Connection,
         credentials: OAuth2Credentials,
@@ -728,12 +834,6 @@ class ConnectionService {
         }
     }
 
-    private removeFromRunningRefreshes(connectionId: string, providerConfigKey: string): void {
-        this.runningCredentialsRefreshes = this.runningCredentialsRefreshes.filter(
-            (refresh) => !(refresh.connectionId === connectionId && refresh.providerConfigKey === providerConfigKey)
-        );
-    }
-
     private async logActivity(activityLogId: number, environment_id: number, message: string): Promise<void> {
         await updateActivityLogAction(activityLogId, 'token');
         await createActivityLogMessage({
@@ -757,4 +857,16 @@ class ConnectionService {
     }
 }
 
-export default new ConnectionService();
+const locking = await (async () => {
+    let store: KVStore;
+    const url = getRedisUrl();
+    if (url) {
+        store = new RedisKVStore(url);
+        await (store as RedisKVStore).connect();
+    } else {
+        store = new InMemoryKVStore();
+    }
+    return new Locking(store);
+})();
+
+export default new ConnectionService(locking);

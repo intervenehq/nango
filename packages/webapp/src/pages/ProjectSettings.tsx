@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { AlertTriangle, HelpCircle } from '@geist-ui/icons';
 import { TrashIcon } from '@heroicons/react/24/outline';
 import { Tooltip, useModal, Modal } from '@geist-ui/core';
+import Nango from '@nangohq/frontend';
 
 import {
     useGetProjectInfoAPI,
@@ -19,6 +20,7 @@ import DashboardLayout from '../layout/DashboardLayout';
 import { LeftNavBarItems } from '../components/LeftNavBar';
 import SecretInput from '../components/ui/input/SecretInput';
 import { useStore } from '../store';
+import Button from '../components/ui/button/Button';
 
 export default function ProjectSettings() {
     const [loaded, setLoaded] = useState(false);
@@ -31,16 +33,20 @@ export default function ProjectSettings() {
     const [hasPendingPublicKey, setHasPendingPublicKey] = useState(false);
 
     const [callbackUrl, setCallbackUrl] = useState('');
+    const [hostUrl, setHostUrl] = useState('');
 
     const [webhookUrl, setWebhookUrl] = useState('');
     const [callbackEditMode, setCallbackEditMode] = useState(false);
     const [webhookEditMode, setWebhookEditMode] = useState(false);
 
+    const [slackIsConnected, setSlackIsConnected] = useState(false);
+
     const [hmacKey, setHmacKey] = useState('');
     const [hmacEnabled, setHmacEnabled] = useState(false);
+    const [accountUUID, setAccountUUID] = useState<number>();
     const [alwaysSendWebhook, setAlwaysSendWebhook] = useState(false);
     const [hmacEditMode, setHmacEditMode] = useState(false);
-    const [envVariables, setEnvVariables] = useState<{ name: string; value: string }[]>([]);
+    const [envVariables, setEnvVariables] = useState<{ id?: number, name: string; value: string }[]>([]);
     const getProjectInfoAPI = useGetProjectInfoAPI();
     const editCallbackUrlAPI = useEditCallbackUrlAPI();
     const editWebhookUrlAPI = useEditWebhookUrlAPI();
@@ -55,7 +61,9 @@ export default function ProjectSettings() {
     const env = useStore((state) => state.cookieValue);
 
     useEffect(() => {
+        setEnvVariables(envVariables.filter((env) => env.id ));
         setLoaded(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [env]);
 
     useEffect(() => {
@@ -75,14 +83,18 @@ export default function ProjectSettings() {
                 setCallbackUrl(account.callback_url || defaultCallback());
 
                 setWebhookUrl(account.webhook_url || '');
+                setHostUrl(account.host);
+                setAccountUUID(account.uuid);
 
                 setHmacEnabled(account.hmac_enabled);
                 setAlwaysSendWebhook(account.always_send_webhook);
                 setHmacKey(account.hmac_key);
 
+                setSlackIsConnected(account.slack_notifications);
+
                 setEnvVariables(account.env_variables);
             }
-        };
+       };
 
         if (!loaded) {
             setLoaded(true);
@@ -169,7 +181,12 @@ export default function ProjectSettings() {
         const entries = Array.from(formData.entries());
 
         const envVariablesArray = entries.reduce((acc, [key, value]) => {
-            const match = key.match(/^env_var_(name|value)_(\d+)$/);
+            // we use the index to match on the name and value
+            // but strip everything before the dash to remove the dynamic aspect
+            // to the name. The dynamic aspect is needed to make sure the values
+            // show correctly when reloading environments
+            const strippedKey = key.split('-')[1];
+            const match = strippedKey.match(/^env_var_(name|value)_(\d+)$/);
             if (match) {
                 const type = match[1];
                 const index = parseInt(match[2], 10);
@@ -199,8 +216,8 @@ export default function ProjectSettings() {
     const handleRemoveEnvVariable = async (index: number) => {
         setEnvVariables(envVariables.filter((_, i) => i !== index));
 
-        const strippedEnvVariables = envVariables.filter((_, i) => i !== index).filter((envVariable) => envVariable.name !== '' && envVariable.value !== '');
-        const res = await editEnvVariables(strippedEnvVariables);
+        const strippedEnvVariables = envVariables.filter((_, i) => i !== index).filter((envVariable) => envVariable.name && envVariable.value);
+        const res = await editEnvVariables(strippedEnvVariables as unknown as Array<Record<string,string>>);
 
         if (res?.status === 200) {
             toast.success('Environment variables updated!', { position: toast.POSITION.BOTTOM_CENTER });
@@ -287,6 +304,67 @@ export default function ProjectSettings() {
                 setHasPendingSecretKey(false);
             }
         }
+    };
+
+    const updateSlackNotifications = async (enabled: boolean) => {
+        await fetch('/api/v1/environment/slack-notifications-enabled', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                slack_notifications: enabled
+            })
+        });
+    }
+
+    const disconnectSlack = async () => {
+        await updateSlackNotifications(false);
+
+        const res = await fetch(`/api/v1/connection/admin/account-${accountUUID}`, {
+            method: 'DELETE'
+        });
+
+        if (res?.status !== 204) {
+            toast.error('There was a problem when disconnecting Slack', { position: toast.POSITION.BOTTOM_CENTER });
+        } else {
+            toast.success('Slack was disconnected successfully.', { position: toast.POSITION.BOTTOM_CENTER });
+            setSlackIsConnected(false);
+        }
+    }
+
+    const connectSlack = async () => {
+        const connectionId =  `account-${accountUUID}`;
+
+        const res = await fetch(`/api/v1/environment/admin-auth?connection_id=${connectionId}`, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        });
+
+        if (res?.status !== 200) {
+            toast.error('Something went wrong during the lookup for the Slack connect', { position: toast.POSITION.BOTTOM_CENTER });
+            return;
+        }
+
+        const authResponse = await res.json();
+        const { hmac_digest: hmacDigest, public_key: publicKey, integration_key: integrationKey } = authResponse;
+
+        const nango = new Nango({ host: hostUrl, publicKey });
+        nango.auth(integrationKey, connectionId, {
+                user_scope: [],
+                params: {},
+                hmac: hmacDigest,
+            })
+            .then(async () => {
+                await updateSlackNotifications(true);
+                setSlackIsConnected(true);
+                toast.success('Slack connection created!', { position: toast.POSITION.BOTTOM_CENTER });
+            })
+            .catch((err: { message: string; type: string }) => {
+                console.log(err);
+            });
     };
 
     return (
@@ -379,6 +457,11 @@ export default function ProjectSettings() {
                                             </>
                                         )}
                                     </div>
+                                    {hasPendingPublicKey && (
+                                        <div className=" text-red-500 text-sm">
+                                            Click 'Activate' to use this new key. Until then, Nango expects the old key. After activation the old key won't work.
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                             <div>
@@ -446,8 +529,40 @@ export default function ProjectSettings() {
                                             </>
                                         )}
                                     </div>
+                                    {hasPendingSecretKey && (
+                                        <div className=" text-red-500 text-sm">
+                                            Click 'Activate' to use this new key. Until then, Nango expects the old key. After activation the old key won't work.
+                                        </div>
+                                    )}
                                 </div>
                             </div>
+                            {env === 'prod' && (
+                                <div className="flex items-center justify-between mx-8 mt-8">
+                                    <div>
+                                        <label htmlFor="slack_alerts" className="flex text-text-light-gray items-center block text-sm font-semibold mb-2">
+                                            Slack Alerts
+                                        <Tooltip
+                                            text={
+                                                <div className="flex text-black text-sm">
+                                                    {slackIsConnected ?
+                                                        'Stop receiving Slack alerts to a public channel of your choice when a syncs or actions fail.' :
+                                                        'Receive Slack alerts to a public channel of your choice when a syncs or actions fail.'
+                                                    }
+                                                </div>
+                                            }
+                                        >
+                                            <HelpCircle color="gray" className="h-5 ml-1"></HelpCircle>
+                                        </Tooltip>
+                                        </label>
+                                    </div>
+                                    <div className="">
+                                        <Button className="items-center" variant="primary" onClick={slackIsConnected ? disconnectSlack : connectSlack}>
+                                            <img src={`images/template-logos/slack.svg`} alt="" className="flex h-7 pb-0.5" />
+                                            {slackIsConnected ? 'Disconnect' : 'Connect'}
+                                        </Button>
+                                    </div>
+                                </div>
+                            )}
                             <div>
                                 <div className="mx-8 mt-8">
                                     <div className="flex text-white  mb-2">
@@ -599,7 +714,7 @@ export default function ProjectSettings() {
                                             text={
                                                 <>
                                                     <div className="flex text-black text-sm">
-                                                        {`When running a sync a webhook can always be sent after completion or only sent when data is added, created, or deleted.`}
+                                                        {`If checked, a webhook wil be sent on every sync run completion, even if no data has changed.`}
                                                     </div>
                                                 </>
                                             }
@@ -648,7 +763,7 @@ export default function ProjectSettings() {
                                     </div>
                                     {!hmacEditMode && (
                                         <div className="flex">
-                                            <SecretInput disabled copy={true} defaultValue={hmacKey} additionalclass="w-full" />
+                                            <SecretInput disabled optionalvalue={hmacKey} setoptionalvalue={setHmacKey} additionalclass="w-full" />
                                             <button
                                                 onClick={() => setHmacEditMode(!hmacEditMode)}
                                                 className="hover:bg-gray-700 bg-gray-800 text-white flex h-11 rounded-md ml-4 px-4 pt-3 text-sm"
@@ -665,7 +780,8 @@ export default function ProjectSettings() {
                                                     name="hmac_key"
                                                     autoComplete="new-password"
                                                     type="text"
-                                                    defaultValue={hmacKey}
+                                                    value={hmacKey}
+                                                    onChange={(event) => setHmacKey(event.target.value)}
                                                     className="border-border-gray bg-bg-black text-text-light-gray focus:ring-blue block h-11 w-full appearance-none rounded-md border px-3 py-2 text-base placeholder-gray-600 shadow-sm focus:border-blue-500 focus:outline-none"
                                                 />
                                                 <button
@@ -715,10 +831,10 @@ export default function ProjectSettings() {
                                         onSubmit={handleEnvVariablesSave}
                                     >
                                         {envVariables.map((envVar, index) => (
-                                            <div key={index} className="flex items-center mt-2">
+                                            <div key={envVar.id || `${envVar.name}_${index}`} className="flex items-center mt-2">
                                                 <input
-                                                    id={`env_var_name_${index}`}
-                                                    name={`env_var_name_${index}`}
+                                                    id={`env_var_name_${envVar.id || index}`}
+                                                    name={`${envVar.id || index}-env_var_name_${index}`}
                                                     defaultValue={envVar.name}
                                                     autoComplete="new-password"
                                                     required
@@ -726,8 +842,8 @@ export default function ProjectSettings() {
                                                     className="border-border-gray bg-bg-black text-text-light-gray focus:ring-blue block h-11 w-full appearance-none rounded-md border text-base placeholder-gray-600 shadow-sm focus:border-blue-500 focus:outline-none mr-3"
                                                 />
                                                 <input
-                                                    id={`env_var_value_${index}`}
-                                                    name={`env_var_value_${index}`}
+                                                    id={`env_var_value_${envVar.id || index}`}
+                                                    name={`${envVar.id || index}-env_var_value_${index}`}
                                                     defaultValue={envVar.value}
                                                     required
                                                     autoComplete="new-password"

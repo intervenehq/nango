@@ -1,3 +1,4 @@
+import type { Context } from '@temporalio/activity';
 import { loadLocalNangoConfig, nangoConfigFile } from '../nango-config.service.js';
 import type { NangoConnection } from '../../models/Connection.js';
 import { SyncResult, SyncType, SyncStatus, Job as SyncJob, IntegrationServiceInterface } from '../../models/Sync.js';
@@ -11,13 +12,13 @@ import { formatDataRecords } from './data/records.service.js';
 import { upsert } from './data/data.service.js';
 import { getDeletedKeys, takeSnapshot, clearOldRecords, syncUpdateAtForDeletedRecords } from './data/delete.service.js';
 import environmentService from '../environment.service.js';
-import webhookService from '../webhook.service.js';
-import { NangoSync } from '../../sdk/sync.js';
+import slackNotificationService from './notification/slack.service.js';
+import webhookService from './notification/webhook.service.js';
 import { isCloud, getApiUrl, JAVASCRIPT_PRIMITIVES } from '../../utils/utils.js';
 import errorManager, { ErrorSourceEnum } from '../../utils/error.manager.js';
 import { NangoError } from '../../utils/error.js';
 import metricsManager, { MetricTypes } from '../../utils/metrics.manager.js';
-import type { NangoIntegrationData, NangoIntegration } from '../../integrations/index.js';
+import type { NangoIntegrationData, NangoIntegration } from '../../models/NangoConfig.js';
 import type { UpsertResponse, UpsertSummary } from '../../models/Data.js';
 import { LogActionEnum } from '../../models/Activity.js';
 import type { Environment } from '../../models/Environment';
@@ -27,6 +28,8 @@ interface SyncRunConfig {
     integrationService: IntegrationServiceInterface;
     writeToDb: boolean;
     isAction?: boolean;
+    isInvokedImmediately?: boolean;
+    isWebhook?: boolean;
     nangoConnection: NangoConnection;
     syncName: string;
     syncType: SyncType;
@@ -42,12 +45,15 @@ interface SyncRunConfig {
 
     logMessages?: unknown[] | undefined;
     stubbedMetadata?: Metadata | undefined;
+
+    temporalContext?: Context;
 }
 
 export default class SyncRun {
     integrationService: IntegrationServiceInterface;
     writeToDb: boolean;
     isAction: boolean;
+    isInvokedImmediately: boolean;
     nangoConnection: NangoConnection;
     syncName: string;
     syncType: SyncType;
@@ -61,15 +67,20 @@ export default class SyncRun {
     input?: object;
 
     logMessages?: unknown[] | undefined = [];
-    stubbedMetadata?: Metadata | undefined = {};
+    stubbedMetadata?: Metadata | undefined = undefined;
+
+    temporalContext?: Context;
+    isWebhook: boolean;
 
     constructor(config: SyncRunConfig) {
         this.integrationService = config.integrationService;
         this.writeToDb = config.writeToDb;
         this.isAction = config.isAction || false;
+        this.isWebhook = config.isWebhook || false;
         this.nangoConnection = config.nangoConnection;
         this.syncName = config.syncName;
         this.syncType = config.syncType;
+        this.isInvokedImmediately = Boolean(config.isAction || config.isWebhook);
 
         if (config.syncId) {
             this.syncId = config.syncId;
@@ -106,6 +117,10 @@ export default class SyncRun {
         if (config.stubbedMetadata) {
             this.stubbedMetadata = config.stubbedMetadata;
         }
+
+        if (config.temporalContext) {
+            this.temporalContext = config.temporalContext;
+        }
     }
 
     async run(
@@ -140,7 +155,7 @@ export default class SyncRun {
                 console.error(message);
             }
 
-            const errorType = this.isAction ? 'action_script_failure' : 'sync_script_failre';
+            const errorType = this.determineErrorType();
             return { success: false, error: new NangoError(errorType, message, 404), response: false };
         }
 
@@ -150,7 +165,7 @@ export default class SyncRun {
         if (!integrations[this.nangoConnection.provider_config_key] && !this.writeToDb) {
             const message = `The connection you provided which applies to integration "${this.nangoConnection.provider_config_key}" does not match any integration in the ${nangoConfigFile}`;
 
-            const errorType = this.isAction ? 'action_script_failure' : 'sync_script_failre';
+            const errorType = this.determineErrorType();
             return { success: false, error: new NangoError(errorType, message, 404), response: false };
         }
 
@@ -165,7 +180,7 @@ export default class SyncRun {
             if (!environment && !bypassEnvironment) {
                 const message = `No environment was found for ${this.nangoConnection.environment_id}. The sync cannot continue without a valid environment`;
                 await this.reportFailureForResults(message);
-                const errorType = this.isAction ? 'action_script_failure' : 'sync_script_failre';
+                const errorType = this.determineErrorType();
                 return { success: false, error: new NangoError(errorType, message, 404), response: false };
             }
 
@@ -174,7 +189,14 @@ export default class SyncRun {
             const providerConfigKey = this.nangoConnection.provider_config_key;
             const syncObject = integrations[providerConfigKey] as unknown as { [key: string]: NangoIntegration };
 
-            const syncData = syncObject[this.syncName] as unknown as NangoIntegrationData;
+            let syncData: NangoIntegrationData;
+
+            if (this.isAction) {
+                syncData = (syncObject['actions'] ? syncObject!['actions']![this.syncName] : syncObject[this.syncName]) as unknown as NangoIntegrationData;
+            } else {
+                syncData = (syncObject['syncs'] ? syncObject!['syncs']![this.syncName] : syncObject[this.syncName]) as unknown as NangoIntegrationData;
+            }
+
             const { returns: models, track_deletes: trackDeletes } = syncData;
 
             if (syncData.sync_config_id) {
@@ -207,7 +229,7 @@ export default class SyncRun {
                     const message = `Integration was attempted to run for ${this.syncName} but no integration file was found at ${integrationFilePath}.`;
                     await this.reportFailureForResults(message);
 
-                    const errorType = this.isAction ? 'action_script_failure' : 'sync_script_failre';
+                    const errorType = this.determineErrorType();
 
                     return { success: false, error: new NangoError(errorType, message, 404), response: false };
                 }
@@ -215,7 +237,7 @@ export default class SyncRun {
 
             let lastSyncDate: Date | null | undefined = null;
 
-            if (!this.isAction) {
+            if (!this.isInvokedImmediately) {
                 if (!this.writeToDb) {
                     lastSyncDate = optionalLastSyncDate;
                 } else {
@@ -225,24 +247,25 @@ export default class SyncRun {
             }
 
             // TODO this only works for dryrun at the moment
-            if (this.isAction && syncData.inputs) {
-                const { inputs } = syncData;
-                if (JAVASCRIPT_PRIMITIVES.includes(inputs as unknown as string)) {
-                    if (typeof this.input !== (inputs as unknown as string)) {
-                        const message = `The input provided of ${this.input} for ${this.syncName} is not of type ${inputs}`;
+            if (this.isAction && syncData.input) {
+                const { input: configInput } = syncData;
+                if (JAVASCRIPT_PRIMITIVES.includes(configInput as unknown as string)) {
+                    if (typeof this.input !== (configInput as unknown as string)) {
+                        const message = `The input provided of ${this.input} for ${this.syncName} is not of type ${configInput}`;
                         await this.reportFailureForResults(message);
 
                         return { success: false, error: new NangoError('action_script_failure', message, 500), response: false };
                     }
                 } else {
-                    if (configModels[inputs as unknown as string]) {
+                    if (configModels[configInput as unknown as string]) {
                         // TODO use joi or zod to validate the input dynamically
                     }
                 }
             }
 
-            const nango = new NangoSync({
+            const nangoProps = {
                 host: optionalHost || getApiUrl(),
+                accountId: environment?.account_id as number,
                 connectionId: String(this.nangoConnection?.connection_id),
                 environmentId: this.nangoConnection?.environment_id as number,
                 providerConfigKey: String(this.nangoConnection?.provider_config_key),
@@ -257,7 +280,7 @@ export default class SyncRun {
                 track_deletes: trackDeletes as boolean,
                 logMessages: this.logMessages,
                 stubbedMetadata: this.stubbedMetadata
-            });
+            };
 
             if (this.debug) {
                 const content = `Last sync date is ${lastSyncDate}`;
@@ -286,20 +309,24 @@ export default class SyncRun {
                     response: userDefinedResults
                 } = await this.integrationService.runScript(
                     this.syncName,
+                    (this.syncId as string) ||
+                        `${this.syncName}-${this.nangoConnection.environment_id}-${this.nangoConnection.provider_config_key}-${this.nangoConnection.connection_id}`,
                     this.activityLogId as number,
-                    nango,
+                    nangoProps,
                     syncData,
                     this.nangoConnection.environment_id,
                     this.writeToDb,
-                    this.isAction,
+                    this.isInvokedImmediately,
+                    this.isWebhook,
                     this.loadLocation,
-                    this.input
+                    this.input,
+                    this.temporalContext
                 );
 
                 if (!success || (error && userDefinedResults === null)) {
                     const message = `The integration was run but there was a problem in retrieving the results from the script "${this.syncName}"${
                         syncData?.version ? ` version: ${syncData.version}` : ''
-                    }.`;
+                    }`;
                     await this.reportFailureForResults(message);
 
                     return { success: false, error, response: false };
@@ -334,13 +361,22 @@ export default class SyncRun {
                         content
                     });
 
+                    await slackNotificationService.removeFailingConnection(
+                        this.nangoConnection,
+                        this.syncName,
+                        this.syncType,
+                        this.activityLogId as number,
+                        this.nangoConnection.environment_id,
+                        this.provider as string
+                    );
+
                     return { success: true, error: null, response: userDefinedResults };
                 }
 
                 // means a void response from the sync script which is expected
                 // and means that they're using batchSave or batchDelete
                 if (userDefinedResults === undefined) {
-                    await this.finishSync(models, syncStartDate, syncData.version as string, trackDeletes);
+                    await this.finishSync(models, syncStartDate, syncData.version as string, totalRunTime, trackDeletes);
 
                     return { success: true, error: null, response: true };
                 }
@@ -381,6 +417,7 @@ export default class SyncRun {
                                     models.length,
                                     syncStartDate,
                                     syncData.version as string,
+                                    totalRunTime,
                                     trackDeletes
                                 );
                             }
@@ -414,14 +451,22 @@ export default class SyncRun {
                                 if (upsertResult.success) {
                                     const { summary } = upsertResult;
 
-                                    await this.reportResults(model, summary as UpsertSummary, i, models.length, syncStartDate, syncData.version as string);
+                                    await this.reportResults(
+                                        model,
+                                        summary as UpsertSummary,
+                                        i,
+                                        models.length,
+                                        syncStartDate,
+                                        syncData.version as string,
+                                        totalRunTime
+                                    );
                                 }
 
                                 if (!upsertResult.success) {
                                     const message = `There was a problem upserting the data for ${this.syncName} and the model ${model} with the error message: ${upsertResult?.error}`;
                                     await this.reportFailureForResults(message);
 
-                                    const errorType = this.isAction ? 'action_script_failure' : 'sync_script_failre';
+                                    const errorType = this.determineErrorType();
 
                                     return { success: false, error: new NangoError(errorType, message), response: result };
                                 }
@@ -441,7 +486,7 @@ export default class SyncRun {
                     } sync did not complete successfully and has the following error: ${errorMessage}`
                 );
 
-                const errorType = this.isAction ? 'action_script_failure' : 'sync_script_failre';
+                const errorType = this.determineErrorType();
 
                 return { success: false, error: new NangoError(errorType, errorMessage), response: result };
             }
@@ -450,15 +495,15 @@ export default class SyncRun {
         return { success: true, error: null, response: result };
     }
 
-    async finishSync(models: string[], syncStartDate: Date, version: string, trackDeletes?: boolean): Promise<void> {
+    async finishSync(models: string[], syncStartDate: Date, version: string, totalRunTime: number, trackDeletes?: boolean): Promise<void> {
         let i = 0;
         for (const model of models) {
-            if (trackDeletes) {
+            if (!this.isWebhook && trackDeletes) {
                 await clearOldRecords(this.nangoConnection?.id as number, model);
             }
             const deletedKeys = trackDeletes ? await getDeletedKeys('_nango_sync_data_records', 'external_id', this.nangoConnection.id as number, model) : [];
 
-            if (trackDeletes) {
+            if (!this.isWebhook && trackDeletes) {
                 await syncUpdateAtForDeletedRecords(this.nangoConnection.id as number, model, 'external_id', deletedKeys);
             }
 
@@ -469,6 +514,7 @@ export default class SyncRun {
                 models.length,
                 syncStartDate,
                 version,
+                totalRunTime,
                 trackDeletes
             );
             i++;
@@ -482,6 +528,7 @@ export default class SyncRun {
         numberOfModels: number,
         syncStartDate: Date,
         version: string,
+        totalRunTime: number,
         trackDeletes?: boolean
     ): Promise<void> {
         if (!this.writeToDb || !this.activityLogId || !this.syncJobId) {
@@ -496,11 +543,21 @@ export default class SyncRun {
             // any changes while the sync is running
             // but if the sync date was set by the user in the integration script,
             // then don't override it
-            const override = false;
-            await setLastSyncDate(this.syncId as string, syncStartDate, override);
+            if (!this.isWebhook) {
+                const override = false;
+                await setLastSyncDate(this.syncId as string, syncStartDate, override);
+                await slackNotificationService.removeFailingConnection(
+                    this.nangoConnection,
+                    this.syncName,
+                    this.syncType,
+                    this.activityLogId as number,
+                    this.nangoConnection.environment_id,
+                    this.provider as string
+                );
+            }
         }
 
-        if (trackDeletes) {
+        if (!this.isWebhook && trackDeletes) {
             await takeSnapshot(this.nangoConnection?.id as number, model);
         }
 
@@ -558,7 +615,7 @@ export default class SyncRun {
             deleted
         };
 
-        await webhookService.sendUpdate(
+        await webhookService.send(
             this.nangoConnection,
             this.syncName,
             model,
@@ -602,6 +659,7 @@ export default class SyncRun {
                 syncId: this.syncId as string,
                 syncJobId: String(this.syncJobId),
                 syncType: this.syncType,
+                totalRunTime: `${totalRunTime} seconds`,
                 debug: String(this.debug)
             },
             `syncId:${this.syncId}`
@@ -609,7 +667,22 @@ export default class SyncRun {
     }
 
     async reportFailureForResults(content: string) {
-        if (!this.writeToDb || !this.activityLogId || !this.syncJobId) {
+        if (!this.writeToDb) {
+            return;
+        }
+
+        if (!this.isWebhook) {
+            await slackNotificationService.reportFailure(
+                this.nangoConnection,
+                this.syncName,
+                this.syncType,
+                this.activityLogId as number,
+                this.nangoConnection.environment_id,
+                this.provider as string
+            );
+        }
+
+        if (!this.activityLogId || !this.syncJobId) {
             console.error(content);
             return;
         }
@@ -654,5 +727,15 @@ export default class SyncRun {
             },
             `syncId:${this.syncId}`
         );
+    }
+
+    private determineErrorType(): string {
+        if (this.isAction) {
+            return 'action_script_failure';
+        } else if (this.isWebhook) {
+            return 'webhook_script_failure';
+        } else {
+            return 'sync_script_failure';
+        }
     }
 }
